@@ -7944,11 +7944,30 @@ static uint32_t MSABI i_GetFinalPathNameByHandleW(void*h,uint16_t*buf,uint32_t c
 // hand us a populated one; nuke it for robustness)
 static void rmrf(const char *p){ struct stat st; if(lstat(p,&st)) return;
     if(S_ISDIR(st.st_mode)){ DIR*d=opendir(p); if(d){ struct dirent*e; while((e=readdir(d))){ if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")) continue; char c[2300]; snprintf(c,sizeof c,"%s/%s",p,e->d_name); rmrf(c);} closedir(d);} rmdir(p);} else unlink(p); }
+// Where a non-empty directory may be removed recursively: only below the prefix's drive_c (the client's own
+// profile / cache / scratch folders), never drive_c itself or anything under its Program Files (the MCC install),
+// and never outside the prefix (Z:\ is the whole Mac). Elsewhere a non-empty directory fails as on Windows.
+// PELOAD_RMDIR_LAX = the old behavior (recursive anywhere).
+static int rmrf_allowed(const char*p){
+    if(getenv("PELOAD_RMDIR_LAX")) return 1;
+    char rp[PATH_MAX], rc[PATH_MAX]; if(!realpath(p,rp) || !g_drivec[0] || !realpath(g_drivec,rc)) return 0;
+    size_t n=strlen(rc); if(strncmp(rp,rc,n) || rp[n]!='/' || !rp[n+1]) return 0;   // strictly below drive_c
+    if(!strncasecmp(rp+n+1,"Program Files",13)) return 0;                         // Program Files, Program Files (x86)
+    return 1; }
+// RemoveDirectoryW / delete-on-close of a directory: rmdir; a non-empty one recursively only where rmrf_allowed.
+// Returns 0 or the Win32 error. (RemoveDirectoryW used to rm -rf any non-empty directory and always succeed.)
+static uint32_t rmdir_win(const char*p,const char*why){
+    if(rmdir(p)==0) return 0;
+    if(errno==ENOTEMPTY || errno==EEXIST){
+        int ok=rmrf_allowed(p); char m[2300]; int k=snprintf(m,sizeof m,"  [%s] %s not empty: %s\n",why,p,ok?"removed recursively":"refused (outside the prefix's own folders)"); (void)!write(2,m,k);
+        if(!ok) return 145;   // ERROR_DIR_NOT_EMPTY
+        rmrf(p); struct stat st; return lstat(p,&st)==0?145:0; }
+    return errno==ENOENT?2:errno==ENOTDIR?267/*ERROR_DIRECTORY*/:win_err(); }
 static int MSABI i_RemoveDirectoryW(const uint16_t*w); // fwd
 static int MSABI i_RemoveDirectoryA(const char*a){ uint16_t w[2048]; int i=0; for(; a&&a[i]&&i<2047;i++) w[i]=(uint8_t)a[i]; w[i]=0; return i_RemoveDirectoryW(w); }
 static int MSABI i_RemoveDirectoryW(const uint16_t*w){ char p[2048]; win2unix(w,p,sizeof p);
     if(getenv("PELOAD_TRACE_DEL")){ static int n; if(n++<40){ char m[2200]; int k=snprintf(m,sizeof m,"  [RemoveDirectoryW] %s\n",p); (void)!write(2,m,k); } }
-    if(rmdir(p)==0) return 1; rmrf(p); return 1; }
+    uint32_t e=rmdir_win(p,"RemoveDirectoryW"); if(e){ g_lasterr=e; return 0; } g_lasterr=0; return 1; }
 // SetFileInformationByHandle: honor FileDispositionInfo(4)/Ex(21) = delete
 static int MSABI i_SetFileInformationByHandle(void*h,int cls,void*info,uint32_t sz){
     (void)sz; intptr_t hv=(intptr_t)h; if(hv<0x1000) return 1; int fd=(int)(hv-0x1000); if(fd>=MAXFD) return 1;
@@ -8041,7 +8060,7 @@ static int nt_open_common(void **ph,uint32_t acc,void *oa,void *iosb,uint32_t di
     if(fd<0 && (flags&O_CREAT) && errno==ENOENT){ mkparents(path); fd=open(path,flags,0644); }
     if(getenv("PELOAD_TRACE_FS")){ char dd[64]; snprintf(dd,sizeof dd," disp=%u opts=0x%x fl=0x%x errno=%d",disp,opts,flags,fd<0?errno:0); ws("  [NtCreateFile] "); ws(path); ws(dd); ws(fd<0?" FAIL\n":" ok\n"); }
     if(fd<0){ if(errno==ENOENT) snprintf(t_lastfail,sizeof t_lastfail,"NT:%s",path[0]?path:"<empty>"); if(iosb)((uint64_t*)iosb)[0]=0xC0000034; return (int)0xC0000034; } // OBJECT_NAME_NOT_FOUND
-    fd_record(fd,path); if(opts&0x1000) g_fddel[fd<MAXFD?fd:0]=1; // FILE_DELETE_ON_CLOSE
+    fd_record(fd,path); if((opts&0x1000) && fd>=0 && fd<MAXFD) g_fddel[fd]=1; // FILE_DELETE_ON_CLOSE (an fd past MAXFD used to flag fd 0)
     if(ph)*ph=(void*)(intptr_t)(0x1000+fd); if(iosb){((uint64_t*)iosb)[0]=0; ((uint64_t*)iosb)[1]=(disp==2?2:1);} return 0;
 }
 static int MSABI i_NtCreateFile(void **ph,uint32_t acc,void *oa,void *iosb,void *alloc,uint32_t fattr,uint32_t share,uint32_t disp,uint32_t opts,void *ea,uint32_t eal){
@@ -8512,7 +8531,7 @@ static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,
             ws("\n"); }
         return (void*)-1; } g_lasterr=0; // INVALID_HANDLE_VALUE
     fd_record(fd,p); hb_note_map(p);   // hitbox.c: remembers opened .map files (collision models for PELOAD_HITBOXES)
-    if(fl&0x04000000) g_fddel[fd<MAXFD?fd:0]=1; // FILE_FLAG_DELETE_ON_CLOSE
+    if((fl&0x04000000) && fd>=0 && fd<MAXFD) g_fddel[fd]=1; // FILE_FLAG_DELETE_ON_CLOSE
     return (void*)(intptr_t)(0x1000+fd);
 }
 // Overlapped reads on PIPES/SOCKETS (anon pipes are socketpairs): they have no file offset, so pread()
@@ -8588,7 +8607,7 @@ static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h;
         if(g_fddel[fd]&&g_fdpath[fd]){ char *path=g_fdpath[fd]; int other=0;
             for(int i=0;i<MAXFD;i++) if(i!=fd && g_fdpath[i] && !strcmp(g_fdpath[i],path)){ other=1; break; }
             int keepadv = getenv("PELOAD_KEEP_ADV") && strstr(path,"local-servers") && strstr(path,".json");
-            if(!other && !keepadv){ if(getenv("PELOAD_TRACE_FS")){ws("  [del-on-close] ");ws(path);ws("\n");} struct stat ds; if(stat(path,&ds)==0){ if(S_ISDIR(ds.st_mode)) rmrf(path); else unlink(path); } } }
+            if(!other && !keepadv){ if(getenv("PELOAD_TRACE_FS")){ws("  [del-on-close] ");ws(path);ws("\n");} struct stat ds; if(stat(path,&ds)==0){ if(S_ISDIR(ds.st_mode)) (void)rmdir_win(path,"del-on-close"); else unlink(path); } } }
         free(g_fdpath[fd]); g_fdpath[fd]=0; g_fddel[fd]=0; }
     close(fd); } return 1; }
 // env var lookup via the host environment (so RECLAIMER_* pass through)
