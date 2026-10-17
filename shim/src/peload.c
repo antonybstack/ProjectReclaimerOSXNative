@@ -4043,6 +4043,14 @@ static void d3dgl_note_rt(D3DObj* rt){ if(!rt||!getenv("PELOAD_D3DGL_DUMP_RT")) 
 #define GLE_LSTAT 0x8B82
 #define GLE_STREAM 0x88E0
 #define GLE_COLORBIT 0x4000
+// PELOAD_GL_HELPER=1: the renderer's GL runs in the native helper process (glproxy.c, shim/docs/gl-helper.md). From here
+// on the renderer's context is a handle in the loader; other contexts (the window's, WGL) pass through unchanged.
+#include "glproxy.c"
+#define CGLSetCurrentContext(c) glp_cgl_setcur(c)
+#define CGLGetCurrentContext() glp_cgl_getcur()
+#define CGLLockContext(c) glp_cgl_lock(c)
+#define CGLUnlockContext(c) glp_cgl_unlock(c)
+#define CGLFlushDrawable(c) glp_cgl_flush(c)
 // PELOAD_GLCOUNT=1: every GL entry point goes through a counting thunk; each present prints the most-called ones per
 // 2 s (which GL calls a draw costs). Off: the real pointers, untouched.
 static const char* g_glc_name[1024]; static volatile uint64_t g_glc_n[1024]; static int g_glc_cnt;
@@ -4164,7 +4172,7 @@ static int d3dgl_loadgl(void){
     static int done,ok;
     if(done) return ok;
     done=1;
-    #define L(n) G.n=gl_count_wrap(dlsym(RTLD_DEFAULT,"gl" #n),"gl" #n)
+    #define L(n) G.n=gl_count_wrap(glp_dlsym("gl" #n),"gl" #n)
     L(CreateShader);L(ShaderSource);L(CompileShader);L(GetShaderiv);L(GetShaderInfoLog);
     L(CreateProgram);L(AttachShader);L(DetachShader);L(DeleteShader);L(LinkProgram);L(GetProgramiv);
     L(GetProgramInfoLog);L(ProgramParameteri);L(GenProgramPipelines);L(BindProgramPipeline);L(UseProgramStages);
@@ -4322,7 +4330,9 @@ static int d3dgl_ensure(void){
     if(d3dgl_loadgl()){
         // Only create an AppKit window when we are on the main thread; otherwise go offscreen and
         // let the present thread (which safely owns the window) display our backbuffer.
-        if(pthread_main_np() && !getenv("PELOAD_D3DGL_FORCE_OFFSCREEN")){ made=d3dgl_make_window(); g_d3dgl_offscreen=0; }
+        // PELOAD_GL_HELPER=1: the renderer's context is the native helper's (glproxy.c); in process if it can't start
+        if(glp_wanted() && glp_start()){ g_d3dgl_cgl=GLP_CTX; t_glp=1; g_d3dgl_nsctx=0; made=1; g_d3dgl_offscreen=1; }
+        if(!made && pthread_main_np() && !getenv("PELOAD_D3DGL_FORCE_OFFSCREEN")){ made=d3dgl_make_window(); g_d3dgl_offscreen=0; }
         if(!made){ made=d3dgl_make_offscreen(); g_d3dgl_offscreen=1; }
     }
     if(!made){ ws("  [d3dgl] context creation FAILED (loadgl/make_offscreen returned 0)\n"); g_d3dgl_fail=1; g_d3dgl_en=0; pthread_mutex_unlock(&g_d3dgl_lock); return 0; }
@@ -4509,7 +4519,7 @@ static void dg_gltex_dump(int w,int h,unsigned fmt){
     if(!getenv("PELOAD_D3DGL_DUMPGLTEX") || w<256 || h<256) return;
     if(!(((fmt>=70&&fmt<=84)||(fmt>=94&&fmt<=99)))) return;   // BC/DXT only (the map textures)
     static int gt2; if(gt2>=8) return;
-    void(*gti)(unsigned,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glGetTexImage"); if(!gti) return;
+    void(*gti)(unsigned,int,unsigned,unsigned,void*)=glp_dlsym("glGetTexImage"); if(!gti) return;
     unsigned char*buf=calloc(1,(size_t)w*h*4); if(!buf) return; gti(GLE_TEX2D,0,GLE_RGBA,GLE_UBYTE,buf);
     const char*home=getenv("HOME"); char p[160]; snprintf(p,sizeof p,"%s/reclaimer_gltex_%d_%dx%d_f%u.bmp",home?home:"/tmp",gt2,w,h,fmt);
     FILE*f=fopen(p,"wb"); if(f){ uint32_t isz=(uint32_t)w*h*4,fsz=54+isz,oo=54; uint8_t fh[14]={'B','M'}; memcpy(fh+2,&fsz,4); memcpy(fh+10,&oo,4);
@@ -4587,7 +4597,7 @@ static const uint8_t* d3dgl_sub_pixels(D3DObj*o,uint32_t sl,uint32_t m,GLFmt*g,i
 // below it is regenerated (env maps are sampled with explicit LOD).
 static void d3dgl_upload_layered(D3DObj*o,unsigned tgt){
     static void(*ti3)(unsigned,int,int,int,int,int,int,unsigned,unsigned,const void*); static void(*gm)(unsigned); static void(*psi)(unsigned,int); static unsigned(*ge)(void); static int ini;
-    if(!ini){ ini=1; ti3=dlsym(RTLD_DEFAULT,"glTexImage3D"); gm=dlsym(RTLD_DEFAULT,"glGenerateMipmap"); psi=dlsym(RTLD_DEFAULT,"glPixelStorei"); ge=dlsym(RTLD_DEFAULT,"glGetError"); }
+    if(!ini){ ini=1; ti3=glp_dlsym("glTexImage3D"); gm=glp_dlsym("glGenerateMipmap"); psi=glp_dlsym("glPixelStorei"); ge=glp_dlsym("glGetError"); }
     uint32_t nm=tex_nmips(o), ns=tex_nslices(o), L=0;
     if(is_bc(o->fmt)) for(uint32_t m=0;m<nm;m++){ uint64_t sz; uint32_t rp,rows,a,b,c; uint64_t off=tex_sub(o,m,&sz,&rp,&rows,&a,&b,&c); if(off==UINT64_MAX) break;
         int nz=0,n=0; uint64_t st=sz/128?sz/128:1; for(uint64_t i=0;i<sz;i+=st){ n++; if(((const uint8_t*)o->data)[off+i]) nz++; }
@@ -4660,8 +4670,8 @@ static void d3dgl_ensure_tex(D3DObj*o){
     if(!GENV1("PELOAD_NO_BC") && o->data && d3dgl_bc_glfmt(o->fmt,&bcif,&bcbb)){
         uint64_t csz=(uint64_t)((w+3)/4)*((h+3)/4)*bcbb;
         static void(*cti)(unsigned,int,unsigned,int,int,int,int,const void*);
-        static int cti_init; if(!cti_init){ cti=dlsym(RTLD_DEFAULT,"glCompressedTexImage2D"); cti_init=1; }
-        unsigned(*gerr)(void)=dlsym(RTLD_DEFAULT,"glGetError");
+        static int cti_init; if(!cti_init){ cti=glp_dlsym("glCompressedTexImage2D"); cti_init=1; }
+        unsigned(*gerr)(void)=glp_dlsym("glGetError");
         if(cti && o->size>=csz){
             if(gerr) gerr(); // clear
             // halo3 streams map textures mip-by-mip (low-res mips complete FIRST; the full-res mip 0 is
@@ -4687,7 +4697,7 @@ static void d3dgl_ensure_tex(D3DObj*o){
             // keeps the raw compressed upload (single level, no mips).
             if(!GENV1("PELOAD_D3DGL_NOBCDECODE")){
                 uint8_t*rgba=dg_bc_decode(o->fmt,(const uint8_t*)o->data+uoff,(size_t)(o->size-uoff),(int)uw,(int)uh);
-                if(rgba){ static void(*genmip)(unsigned); static int gmi; if(!gmi){ genmip=dlsym(RTLD_DEFAULT,"glGenerateMipmap"); gmi=1; }
+                if(rgba){ static void(*genmip)(unsigned); static int gmi; if(!gmi){ genmip=glp_dlsym("glGenerateMipmap"); gmi=1; }
                     if(gerr) gerr();
                     // SRGB BC formats (BC1/BC2/BC3 _SRGB) store gamma-encoded color -> upload as SRGB8_ALPHA8
                     // so GL de-gammas to linear on sample (matches the compressed-SRGB path we replaced).
@@ -4701,13 +4711,13 @@ static void d3dgl_ensure_tex(D3DObj*o){
                             // hugely minified) -> isotropic trilinear still aliases into vertical scanline
                             // moiré. GL_TEXTURE_MAX_ANISOTROPY (0x84FE) fixes grazing-angle sampling.
                             static void(*tpf)(unsigned,unsigned,float); static void(*gfv)(unsigned,float*); static int qa; static float qmax;
-                            if(!qa){ qa=1; tpf=dlsym(RTLD_DEFAULT,"glTexParameterf"); gfv=dlsym(RTLD_DEFAULT,"glGetFloatv"); qmax=1; if(gfv) gfv(0x84FF/*MAX_TEXTURE_MAX_ANISOTROPY*/,&qmax); if(qmax<1)qmax=1; }
+                            if(!qa){ qa=1; tpf=glp_dlsym("glTexParameterf"); gfv=glp_dlsym("glGetFloatv"); qmax=1; if(gfv) gfv(0x84FF/*MAX_TEXTURE_MAX_ANISOTROPY*/,&qmax); if(qmax<1)qmax=1; }
                             if(!GENV1("PELOAD_D3DGL_NOANISO")){ float ma=16.0f; if(ma>qmax)ma=qmax; if(tpf) tpf(GLE_TEX2D,0x84FE/*TEXTURE_MAX_ANISOTROPY*/,ma); }
                             // PELOAD_D3DGL_LODBIAS=<f>: positive bias blurs (lower-res mip) -> softens the
                             // grazing-angle silhouette streaks that extreme tiling (48x) + aniso can't resolve.
                             if(GENV1("PELOAD_D3DGL_LODBIAS")&&tpf){ float lb=atof(GENV1("PELOAD_D3DGL_LODBIAS")); tpf(GLE_TEX2D,0x8501/*TEXTURE_LOD_BIAS*/,lb); } }
                         else G.TexParameteri(GLE_TEX2D,0x2801,GLE_LINEAR);
-                        if(GENV1("PELOAD_TRACE_TEXUP")){ static int dc; if(dc++<3){ static float qmx; static int qd; if(!qd){ qd=1; void(*gf)(unsigned,float*)=dlsym(RTLD_DEFAULT,"glGetFloatv"); qmx=0; if(gf)gf(0x84FF,&qmx); } char b[180]; int k=snprintf(b,sizeof b,"  [texup-bcdec] %dx%d fmt=%u -> RGBA8 base=%ux%u(dl%d) mips=%d maxaniso=%.1f\n",w,h,o->fmt,uw,uh,baselvl,mip&&genmip?1:0,qmx); (void)!write(2,b,k);} }
+                        if(GENV1("PELOAD_TRACE_TEXUP")){ static int dc; if(dc++<3){ static float qmx; static int qd; if(!qd){ qd=1; void(*gf)(unsigned,float*)=glp_dlsym("glGetFloatv"); qmx=0; if(gf)gf(0x84FF,&qmx); } char b[180]; int k=snprintf(b,sizeof b,"  [texup-bcdec] %dx%d fmt=%u -> RGBA8 base=%ux%u(dl%d) mips=%d maxaniso=%.1f\n",w,h,o->fmt,uw,uh,baselvl,mip&&genmip?1:0,qmx); (void)!write(2,b,k);} }
                         o->gl_uploaded=1; o->gl_dirty=0; o->dpart=0; if(picked && baselvl<254) o->up_base1=(uint8_t)(baselvl+1);
                         g_tx_dec++; g_tx_bytes+=(uint64_t)uw*uh*4; if(tx_t0) g_tx_ms+=(mono_s()-tx_t0)*1000;
                         dg_gltex_dump((int)uw,(int)uh,o->fmt); return; }
@@ -4753,7 +4763,7 @@ static void d3dgl_ensure_tex(D3DObj*o){
             for(uint64_t i=0;i<o->size && nz<32; i+=step){ if(d[i]){ sum+=d[i]; nz++; } } }
         static int tc; if(tc++<60){ char b[160]; int k=snprintf(b,sizeof b,"  [texup] %dx%d fmt=%u size=%lluB can=%d data=%p nonzero-samples=%d sum=%llu%s\n",
             w,h,o->fmt,(unsigned long long)o->size,can,o->data,nz,(unsigned long long)sum,nz?"":" (ALL BLACK)"); (void)!write(2,b,k);} }
-    if(can){ static void(*psi)(unsigned,int); static int pi; if(!pi){ pi=1; psi=dlsym(RTLD_DEFAULT,"glPixelStorei"); }
+    if(can){ static void(*psi)(unsigned,int); static int pi; if(!pi){ pi=1; psi=glp_dlsym("glPixelStorei"); }
         if(psi) psi(0x0CF5,1); G.TexImage2D(GLE_TEX2D,0,(int)gfm.ifmt,w,h,0,gfm.fmt,gfm.type,o->data); if(psi) psi(0x0CF5,4); d3dgl_apply_swz(GLE_TEX2D,gfm.swz);
         o->glsrgb=(gfm.ifmt==0x8C43); }
     else { static const unsigned char mag[4]={255,0,255,255}; G.TexImage2D(GLE_TEX2D,0,GLE_RGBA8,1,1,0,GLE_RGBA,GLE_UBYTE,mag); }
@@ -5146,7 +5156,7 @@ static void d3dgl_apply_state(D3DObj*rt,int vw,int vh){
     gs_viewport(g_d3dst.vp_x, d3dgl_flipy()?g_d3dst.vp_y:H-(g_d3dst.vp_y+vh), vw, vh);
     // viewport depth range (D3D MinDepth/MaxDepth; the VS z remap makes GL's [-1,1] land on [n,f] like D3D's
     // [0,1]), depth clip, depth bias. Without the range the first-person weapon (own depth slice) is buried.
-    { static void(*dr)(double,double); static void(*po)(float,float); static int ini; if(!ini){ ini=1; dr=dlsym(RTLD_DEFAULT,"glDepthRange"); po=dlsym(RTLD_DEFAULT,"glPolygonOffset"); }
+    { static void(*dr)(double,double); static void(*po)(float,float); static int ini; if(!ini){ ini=1; dr=glp_dlsym("glDepthRange"); po=glp_dlsym("glPolygonOffset"); }
       float zn=g_d3dst.vp_set?g_d3dst.vp_zn:0.0f, zf=g_d3dst.vp_set?g_d3dst.vp_zf:1.0f;
       if(dr && !GENV1("PELOAD_D3DGL_NODEPTHRANGE")) gs_depthrange(dr,zn,zf);
       D3DObj*rs=g_d3dst.raster; int dclip=1; float bias=0,slope=0;
@@ -6307,7 +6317,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     { const char*dp=GENV1("PELOAD_D3DGL_DUMPTEX_PS"); static int dumped;
       static long seen_n; long skipn=GENV1("PELOAD_D3DGL_DUMPTEX_SKIP")?atol(GENV1("PELOAD_D3DGL_DUMPTEX_SKIP")):0;
       if(dp && !dumped && ps->bchash==strtoull(dp,0,16) && seen_n++>=skipn){ D3DObj*x=g_d3dst.psrv[0]; D3DObj*xr=(x&&x->data&&x->vkind)?(D3DObj*)x->data:x;
-        static void(*gti)(unsigned,int,unsigned,unsigned,void*); if(!gti) gti=dlsym(RTLD_DEFAULT,"glGetTexImage");
+        static void(*gti)(unsigned,int,unsigned,unsigned,void*); if(!gti) gti=glp_dlsym("glGetTexImage");
         if(xr && xr->gltex && xr->w && xr->h && xr->w<=4096 && xr->h<=4096 && gti){ dumped=1; unsigned char*px=calloc(1,(size_t)xr->w*xr->h*4);
             if(px){ G.BindTexture(xr->gltarget?xr->gltarget:GLE_TEX2D,xr->gltex); TEXCACHE_INVALIDATE(); gti(xr->gltarget?xr->gltarget:GLE_TEX2D,0,GLE_RGBA,GLE_UBYTE,px);
                 const char*h=getenv("HOME"); char pth[300]; snprintf(pth,sizeof pth,"%s/reclaimer_pstex_%s.bmp",h?h:"/tmp",dp); bmp_write_rgba(pth,(int)xr->w,(int)xr->h,px);
@@ -6357,7 +6367,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
     // 1x1 RT and the 1x1 textures each draw samples (GPU readback; diagnostic only, stalls the pipeline).
     { static int ll=-1; if(ll<0) ll=GENV1("PELOAD_D3DGL_LUMLOG")?1:(wd_on()?2:0);
       if(ll){ extern unsigned long g_eng_present_no_x; static void(*gi)(unsigned,int*); static void(*gti)(unsigned,int,unsigned,unsigned,void*);
-        if(!gi){ gi=dlsym(RTLD_DEFAULT,"glGetIntegerv"); gti=dlsym(RTLD_DEFAULT,"glGetTexImage"); }
+        if(!gi){ gi=glp_dlsym("glGetIntegerv"); gti=glp_dlsym("glGetTexImage"); }
         D3DObj*rt=g_d3dst.rtv; D3DObj*rr=(rt&&rt->data&&rt->vkind)?(D3DObj*)rt->data:rt;
         if(rr&&rr->w==1&&rr->h==1&&gi){ int dfb=0,rfb=0; gi(0x8CA6/*DRAW_FB_BINDING*/,&dfb); gi(0x8CAA/*READ_FB_BINDING*/,&rfb); float px[4]={-1,-1,-1,-1};
             gl_bindfbo_any(0x8CA8,(unsigned)dfb); G.ReadPixels(0,0,1,1,GLE_RGBA,0x1406/*FLOAT*/,px); gl_bindfbo_any(0x8CA8,(unsigned)rfb);
@@ -6385,7 +6395,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
             int interval=GENV1("PELOAD_D3DGL_COVINT")?atoi(GENV1("PELOAD_D3DGL_COVINT")):20; if(interval<1)interval=20;
             if(nd<8 && (hits%interval)==0){ static uint8_t*cb2; if(!cb2) cb2=malloc(4096u*4096u*4u);
                 int W=(int)fw>4096?4096:(int)fw, H=(int)fh>4096?4096:(int)fh;
-                { static void(*gi)(unsigned,int*); static unsigned char(*isen)(unsigned); static void(*gb)(unsigned,unsigned char*); if(!gi){ gi=dlsym(RTLD_DEFAULT,"glGetIntegerv"); isen=dlsym(RTLD_DEFAULT,"glIsEnabled"); gb=dlsym(RTLD_DEFAULT,"glGetBooleanv"); }
+                { static void(*gi)(unsigned,int*); static unsigned char(*isen)(unsigned); static void(*gb)(unsigned,unsigned char*); if(!gi){ gi=glp_dlsym("glGetIntegerv"); isen=glp_dlsym("glIsEnabled"); gb=glp_dlsym("glGetBooleanv"); }
                   int fb=-1,rfb=-1,vp[4]={0},prog=-1; unsigned char cm[4]={9,9,9,9}; if(gi){ gi(0x8CA6,&fb); gi(0x8CAA,&rfb); gi(0x0BA2,vp); gi(0x8B8D,&prog); } if(gb) gb(0x0C23,cm);
                   unsigned err=G.GetError?G.GetError():0; char m[260]; int k=snprintf(m,sizeof m,"  [covrt-state] drawfb=%d readfb=%d rt->glfbo=%u gltex=%u vp=%d,%d,%d,%d prog=%d scissor=%d depth=%d blend=%d cull=%d colormask=%d%d%d%d glerr=0x%x\n",
                       fb,rfb,r->glfbo,r->gltex,vp[0],vp[1],vp[2],vp[3],prog,isen?isen(0x0C11):-1,isen?isen(0x0B71):-1,isen?isen(0x0BE2):-1,isen?isen(0x0B44):-1,cm[0],cm[1],cm[2],cm[3],err); (void)!write(2,m,k); }
@@ -6559,12 +6569,13 @@ unsigned long g_eng_present_no_x; static unsigned long g_eng_present_no;   // en
 static unsigned g_pq_tex[3], g_pq_fbo[3]; static void* g_pq_fence[3]; static int g_pq_latest=-1, g_pq_reading=-1, g_pq_w[3], g_pq_h[3]; static unsigned long g_pq_frameno[3];
 static unsigned long g_pq_seq; static pthread_mutex_t g_pq_mx=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_pq_cv=PTHREAD_COND_INITIALIZER;
 static void*(*pq_fencesync)(unsigned,unsigned); static void(*pq_waitsync)(void*,unsigned,uint64_t); static void(*pq_delsync)(void*);
-static int pq_on(void){ static int on=-1; if(on<0){ on=getenv("PELOAD_D3DGL_NOPQ")?0:1; if(on){ pq_fencesync=dlsym(RTLD_DEFAULT,"glFenceSync"); pq_waitsync=dlsym(RTLD_DEFAULT,"glWaitSync"); pq_delsync=dlsym(RTLD_DEFAULT,"glDeleteSync"); if(!pq_fencesync||!pq_waitsync||!pq_delsync) on=0; } } return on; }
+static int pq_on(void){ static int on=-1; if(on<0){ on=getenv("PELOAD_D3DGL_NOPQ")?0:1; if(on){ pq_fencesync=glp_dlsym("glFenceSync"); pq_waitsync=glp_dlsym("glWaitSync"); pq_delsync=glp_dlsym("glDeleteSync"); if(!pq_fencesync||!pq_waitsync||!pq_delsync) on=0; } } return on; }
 // render thread (g_glmx held, render context current)
 static void pq_publish(void){
     if(!pq_on() || !g_d3dgl_present_tex || !G.BlitFramebuffer) return;
     D3DObj*bb=g_d3d_backbuf; if(!bb||!bb->glfbo||bb->gltex!=g_d3dgl_present_tex) return;   // only the swap-chain backbuffer path
     int vw=g_d3dgl_present_vw>0?g_d3dgl_present_vw:g_d3dgl_present_tw, vh=g_d3dgl_present_vh>0?g_d3dgl_present_vh:g_d3dgl_present_th;
+    if(g_glp_on){ glp_pq_publish(bb->glfbo,vw>4096?4096:vw,vh>4096?4096:vh,g_eng_present_no); return; }   // the helper copies it into a present slot
     // the frame keeps the back buffer's resolution (the window blit scales it); it was squeezed into a
     // g_d3dgl_W x g_d3dgl_H (1280x720) texture here, so every frame reached the screen at 720p
     int W=vw>4096?4096:vw, H=vh>4096?4096:vh; if(W<1||H<1) return;
@@ -6588,7 +6599,27 @@ static void pq_publish(void){
     pthread_mutex_lock(&g_pq_mx); g_pq_fence[slot]=f; g_pq_latest=slot; g_pq_seq++; g_pq_frameno[slot]=g_eng_present_no; pthread_cond_signal(&g_pq_cv); pthread_mutex_unlock(&g_pq_mx); }
 // present thread: wait (up to ms) for a frame newer than *seen; draw it. Returns 1 if a frame was shown.
 static unsigned g_pq_prog, g_pq_vao; static int g_pq_sloc=-1;
+// PELOAD_D3DGL_SHOTWIN=<n>: every n-th presented window frame to ~/reclaimer_win_<pid>_<n>_f<frame>.bmp (present thread)
+static void pq_shotwin(unsigned long frame){
+    if(getenv("PELOAD_D3DGL_SHOTWIN")){ static unsigned long bc; int every=atoi(getenv("PELOAD_D3DGL_SHOTWIN")); if(every<1)every=20;
+        // optional window (seconds after "gameplay presentation ready"): PELOAD_D3DGL_SHOTWIN_FROM / _TO
+        double gt=g_gameplay_t0?mono_s()-g_gameplay_t0:-1; const char*fr=getenv("PELOAD_D3DGL_SHOTWIN_FROM"),*to=getenv("PELOAD_D3DGL_SHOTWIN_TO");
+        int inwin=(!fr||(gt>=0&&gt>=atof(fr))) && (!to||(gt>=0&&gt<atof(to)));
+        if(inwin && (bc++ % every)==0 && G.ReadPixels){ int w=g_win_pw>0?g_win_pw:g_d3dgl_W,h=g_win_ph>0?g_win_ph:g_d3dgl_H; unsigned char*cap=calloc(1,(size_t)w*h*4);
+            if(cap){ if(G.ReadBuffer)G.ReadBuffer(0x0405/*BACK*/); G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
+                static int wn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_win_%d_%03d_f%lu%s.bmp",home?home:"/tmp",(int)getpid(),wn++,frame, getenv("PELOAD_D3DGL_ALT5")?((((long)(mono_s()/5.0))&1)?"_B":"_A"):"");
+                bmp_write_rgba(p,w,h,cap); free(cap); } } }
+}
+static void hb_draw_overlay(void); // fwd (hitbox.c)
 static int pq_present_wait(unsigned long*seen,int ms){
+    if(g_glp_on){   // the frame was rendered by the native GL helper: show its IOSurface slot (glproxy.c)
+        int w=0,h=0, slot=glp_present_acquire(seen,ms,&w,&h); if(slot<0) return 0;
+        CGLContextObj pc=CGLGetCurrentContext(); if(pc) CGLLockContext(pc);
+        gl_bindfbo_any(GLE_FBO,0); G.Disable(0x0B71); G.Disable(0x0BE2); G.Disable(0x0C11); G.Disable(0x8DB9);
+        { int dw=g_win_pw>0?g_win_pw:g_d3dgl_W, dh=g_win_ph>0?g_win_ph:g_d3dgl_H; double ar=h>0?(double)w/h:16.0/9; int vw=dw, vh=(int)(dw/ar+0.5); if(vh>dh){ vh=dh; vw=(int)(dh*ar+0.5); }
+          if(vw!=dw||vh!=dh){ G.Viewport(0,0,dw,dh); G.ClearColor(0,0,0,1); G.Clear(GLE_COLORBIT); }
+          G.Viewport((dw-vw)/2,(dh-vh)/2,vw,vh); }
+        glp_present_draw(slot,w,h); hb_draw_overlay(); G.Flush(); if(pc) CGLUnlockContext(pc); glp_present_done(); pq_shotwin((unsigned long)g_glp->slot_frame[slot]); return 1; }
     if(!pq_on()) return 0;
     pthread_mutex_lock(&g_pq_mx);
     if(g_pq_seq==*seen){ struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts); ts.tv_nsec+=(long)ms*1000000L; ts.tv_sec+=ts.tv_nsec/1000000000L; ts.tv_nsec%=1000000000L;
@@ -6615,14 +6646,7 @@ static int pq_present_wait(unsigned long*seen,int ms){
     hb_draw_overlay();   // PELOAD_HITBOXES (hitbox.c): object bounding volumes over the frame
     G.Flush(); if(pc) CGLUnlockContext(pc);
     pthread_mutex_lock(&g_pq_mx); g_pq_reading=-1; pthread_mutex_unlock(&g_pq_mx);
-    if(getenv("PELOAD_D3DGL_SHOTWIN")){ static unsigned long bc; int every=atoi(getenv("PELOAD_D3DGL_SHOTWIN")); if(every<1)every=20;
-        // optional window (seconds after "gameplay presentation ready"): PELOAD_D3DGL_SHOTWIN_FROM / _TO
-        double gt=g_gameplay_t0?mono_s()-g_gameplay_t0:-1; const char*fr=getenv("PELOAD_D3DGL_SHOTWIN_FROM"),*to=getenv("PELOAD_D3DGL_SHOTWIN_TO");
-        int inwin=(!fr||(gt>=0&&gt>=atof(fr))) && (!to||(gt>=0&&gt<atof(to)));
-        if(inwin && (bc++ % every)==0 && G.ReadPixels){ int w=g_win_pw>0?g_win_pw:g_d3dgl_W,h=g_win_ph>0?g_win_ph:g_d3dgl_H; unsigned char*cap=calloc(1,(size_t)w*h*4);
-            if(cap){ if(G.ReadBuffer)G.ReadBuffer(0x0405/*BACK*/); G.ReadPixels(0,0,w,h,GLE_RGBA,GLE_UBYTE,cap);
-                static int wn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_win_%d_%03d_f%lu%s.bmp",home?home:"/tmp",(int)getpid(),wn++,g_pq_frameno[slot], getenv("PELOAD_D3DGL_ALT5")?((((long)(mono_s()/5.0))&1)?"_B":"_A"):"");
-                bmp_write_rgba(p,w,h,cap); free(cap); } } }
+    pq_shotwin(g_pq_frameno[slot]);
     return 1; }
 // Called on the PRESENT thread (owns the window context g_present_glctx, which shares objects with
 // our offscreen render context). Displays the backbuffer the render thread produced.
@@ -6761,7 +6785,7 @@ static void d3dgl_present_impl(void){
     if(getenv("PELOAD_D3DGL_SHOTPRESENT") && g_d3dgl_present_tex){
         static unsigned long pc; int every=atoi(getenv("PELOAD_D3DGL_SHOTPRESENT")); if(every<1)every=30;
         if((pc++ % every)==0){ int w=g_d3dgl_present_tw,h=g_d3dgl_present_th; if(w>0&&h>0&&(long)w*h<=(64<<20)){
-            static void(*gti)(unsigned,int,unsigned,unsigned,void*); static int gi; if(!gi){ gti=dlsym(RTLD_DEFAULT,"glGetTexImage"); gi=1; }
+            static void(*gti)(unsigned,int,unsigned,unsigned,void*); static int gi; if(!gi){ gti=glp_dlsym("glGetTexImage"); gi=1; }
             unsigned char*cap=calloc(1,(size_t)w*h*4);
             if(cap&&gti){ TEXCACHE_INVALIDATE(); G.BindTexture(GLE_TEX2D,g_d3dgl_present_tex); if(G.GetError)G.GetError(); gti(GLE_TEX2D,0,GLE_RGBA,GLE_UBYTE,cap);
                 static int sn; const char*home=getenv("HOME"); char p[512]; snprintf(p,sizeof p,"%s/reclaimer_present_%03d.bmp",home?home:"/tmp",sn++);
@@ -7049,8 +7073,8 @@ static void* present_thread_fn(void*a){ (void)a; pthread_setname_np("shim-presen
         // PELOAD_WIN_SHOT: capture the ACTUAL window framebuffer (post-blit) so we see exactly what the
         // user sees, independent of screencapture z-order/timing. Writes bottom-up BMP (GL readpixels).
         if(getenv("PELOAD_WIN_SHOT")){ static int wc; int every=getenv("PELOAD_WIN_SHOT_EVERY")?atoi(getenv("PELOAD_WIN_SHOT_EVERY")):30; if(every<1)every=30; wc++; if(wc>=5 && (wc % every)==0){
-            void(*rp)(int,int,int,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glReadPixels");
-            void(*rb)(unsigned)=dlsym(RTLD_DEFAULT,"glReadBuffer");
+            void(*rp)(int,int,int,int,unsigned,unsigned,void*)=glp_dlsym("glReadPixels");
+            void(*rb)(unsigned)=glp_dlsym("glReadBuffer");
             if(rp){ int W=WIN_W,H=WIN_H; unsigned char*px=calloc(1,(size_t)W*H*4);
                 if(px){ if(rb)rb(0x0405/*BACK*/); rp(0,0,W,H,0x1908/*RGBA*/,0x1401,px);
                     const char*home=getenv("HOME"); char p[256]; snprintf(p,sizeof p,"%s/reclaimer_win_%d_%d.bmp",home?home:"/tmp",getpid(),wc);
@@ -7120,7 +7144,7 @@ static int MSABI i_wglGetPixelFormatAttribivARB(void*hdc,int fmt,int layer,uint3
 static void* MSABI i_wglCreateContextAttribsARB(void*hdc,void*share,const int*attribs){ (void)share;(void)attribs; return i_wglCreateContext(hdc); }
 static int MSABI i_wglSwapIntervalEXT_(int i){ (void)i; return 1; }
 static int    MSABI i_wglMakeCurrent(void*hdc,void*ctx){ (void)hdc; CGLError e=CGLSetCurrentContext((CGLContextObj)ctx);
-    if(getenv("PELOAD_TRACE_GL")){ const unsigned char*(*gv)(unsigned)=dlsym(RTLD_DEFAULT,"glGetString");
+    if(getenv("PELOAD_TRACE_GL")){ const unsigned char*(*gv)(unsigned)=glp_dlsym("glGetString");
         const unsigned char*v = (gv&&ctx)? gv(0x1F02/*GL_VERSION*/):0; ws("  [wglMakeCurrent] ctx="); ws(ctx?"set":"null");
         ws(" GL_VERSION="); ws(v?(const char*)v:"(null)"); ws("\n"); }
     return e==kCGLNoError; }
@@ -7129,7 +7153,7 @@ static int    MSABI i_wglMakeCurrent(void*hdc,void*ctx){ (void)hdc; CGLError e=C
 // never ran wglMakeCurrent). Then delegate to the real framework glGetString.
 static const unsigned char* MSABI i_glGetString(unsigned name){
     if(g_cgl && CGLGetCurrentContext()==0) CGLSetCurrentContext(g_cgl);
-    const unsigned char*(*real)(unsigned)=dlsym(RTLD_DEFAULT,"glGetString");
+    const unsigned char*(*real)(unsigned)=glp_dlsym("glGetString");
     const unsigned char*r = real? real(name):0;
     // normalize macOS's non-standard strings (parsers choke on "4.1 Metal - 90.5")
     if(name==0x1f02) r=(const unsigned char*)"4.1.0";                 // GL_VERSION
@@ -7138,29 +7162,29 @@ static const unsigned char* MSABI i_glGetString(unsigned name){
     return r; }
 static void *make_gl_thunk(void *real); // fwd
 static unsigned MSABI i_glCheckFramebufferStatus(unsigned target){
-    unsigned(*real)(unsigned)=dlsym(RTLD_DEFAULT,"glCheckFramebufferStatus"); unsigned s=real?real(target):0;
+    unsigned(*real)(unsigned)=glp_dlsym("glCheckFramebufferStatus"); unsigned s=real?real(target):0;
     if(s!=0x8CD5/*COMPLETE*/){ char t[80]; snprintf(t,sizeof t,"  [glCheckFramebufferStatus] target=0x%x -> 0x%x (INCOMPLETE)\n",target,s); ws(t);}
     else if(getenv("PELOAD_TRACE_GL")){ ws("  [glCheckFramebufferStatus] COMPLETE\n"); }
     return s; }
-static unsigned gl_err(void){ unsigned(*g)(void)=dlsym(RTLD_DEFAULT,"glGetError"); return g?g():0; }
+static unsigned gl_err(void){ unsigned(*g)(void)=glp_dlsym("glGetError"); return g?g():0; }
 // Clamp requested MSAA sample count to one macOS supports, consistently, so
 // color+depth multisample attachments match (else INCOMPLETE_ATTACHMENT 0x8CD6).
-static int gl_clamp_samples(int samp){ static int maxs=-1; if(maxs<0){ void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv"); maxs=4; if(gi){int m=0; gi(0x8D57/*GL_MAX_SAMPLES*/,&m); if(m>0)maxs=m;} }
+static int gl_clamp_samples(int samp){ static int maxs=-1; if(maxs<0){ void(*gi)(unsigned,int*)=glp_dlsym("glGetIntegerv"); maxs=4; if(gi){int m=0; gi(0x8D57/*GL_MAX_SAMPLES*/,&m); if(m>0)maxs=m;} }
     if(samp<1) samp=1; if(samp>maxs) samp=maxs; if(samp>4) samp=4; return samp; }
-static void MSABI i_glTexStorage2D(unsigned t,int lv,unsigned ifmt,int w,int h){ gl_err(); void(*r)(unsigned,int,unsigned,int,int)=dlsym(RTLD_DEFAULT,"glTexStorage2D"); if(r)r(t,lv,ifmt,w,h);
+static void MSABI i_glTexStorage2D(unsigned t,int lv,unsigned ifmt,int w,int h){ gl_err(); void(*r)(unsigned,int,unsigned,int,int)=glp_dlsym("glTexStorage2D"); if(r)r(t,lv,ifmt,w,h);
     char s[140]; snprintf(s,sizeof s,"  [glTexStorage2D] ifmt=0x%x %dx%d lv=%d err=0x%x\n",ifmt,w,h,lv,gl_err()); ws(s); }
-static void MSABI i_glTexStorage2DMultisample(unsigned t,int samp,unsigned ifmt,int w,int h,unsigned char fx){ samp=gl_clamp_samples(samp); gl_err(); void(*r)(unsigned,int,unsigned,int,int,unsigned char)=dlsym(RTLD_DEFAULT,"glTexStorage2DMultisample"); if(r)r(t,samp,ifmt,w,h,fx);
+static void MSABI i_glTexStorage2DMultisample(unsigned t,int samp,unsigned ifmt,int w,int h,unsigned char fx){ samp=gl_clamp_samples(samp); gl_err(); void(*r)(unsigned,int,unsigned,int,int,unsigned char)=glp_dlsym("glTexStorage2DMultisample"); if(r)r(t,samp,ifmt,w,h,fx);
     char s[160]; snprintf(s,sizeof s,"  [glTexStorage2DMultisample] samples=%d ifmt=0x%x %dx%d err=0x%x\n",samp,ifmt,w,h,gl_err()); ws(s); }
-static void MSABI i_glTexImage2DMultisample(unsigned t,int samp,unsigned ifmt,int w,int h,unsigned char fx){ samp=gl_clamp_samples(samp); gl_err(); void(*r)(unsigned,int,unsigned,int,int,unsigned char)=dlsym(RTLD_DEFAULT,"glTexImage2DMultisample"); if(r)r(t,samp,ifmt,w,h,fx);
+static void MSABI i_glTexImage2DMultisample(unsigned t,int samp,unsigned ifmt,int w,int h,unsigned char fx){ samp=gl_clamp_samples(samp); gl_err(); void(*r)(unsigned,int,unsigned,int,int,unsigned char)=glp_dlsym("glTexImage2DMultisample"); if(r)r(t,samp,ifmt,w,h,fx);
     char s[160]; snprintf(s,sizeof s,"  [glTexImage2DMultisample] samples=%d ifmt=0x%x %dx%d err=0x%x\n",samp,ifmt,w,h,gl_err()); ws(s); }
-static void MSABI i_glRenderbufferStorage(unsigned t,unsigned ifmt,int w,int h){ gl_err(); void(*r)(unsigned,unsigned,int,int)=dlsym(RTLD_DEFAULT,"glRenderbufferStorage"); if(r)r(t,ifmt,w,h);
+static void MSABI i_glRenderbufferStorage(unsigned t,unsigned ifmt,int w,int h){ gl_err(); void(*r)(unsigned,unsigned,int,int)=glp_dlsym("glRenderbufferStorage"); if(r)r(t,ifmt,w,h);
     char s[140]; snprintf(s,sizeof s,"  [glRenderbufferStorage] ifmt=0x%x %dx%d err=0x%x\n",ifmt,w,h,gl_err()); ws(s); }
-static void MSABI i_glRenderbufferStorageMultisample(unsigned t,int samp,unsigned ifmt,int w,int h){ samp=gl_clamp_samples(samp); gl_err(); void(*r)(unsigned,int,unsigned,int,int)=dlsym(RTLD_DEFAULT,"glRenderbufferStorageMultisample"); if(r)r(t,samp,ifmt,w,h);
+static void MSABI i_glRenderbufferStorageMultisample(unsigned t,int samp,unsigned ifmt,int w,int h){ samp=gl_clamp_samples(samp); gl_err(); void(*r)(unsigned,int,unsigned,int,int)=glp_dlsym("glRenderbufferStorageMultisample"); if(r)r(t,samp,ifmt,w,h);
     char s[160]; snprintf(s,sizeof s,"  [glRenderbufferStorageMultisample] samples=%d ifmt=0x%x %dx%d err=0x%x\n",samp,ifmt,w,h,gl_err()); ws(s); }
 static void gl_check_src(const char*who,int w,int h,unsigned fmt,unsigned type,const void*d); // fwd
 static void MSABI i_glTexImage2D(unsigned t,int l,int ifmt,int w,int h,int b,unsigned fmt,unsigned type,const void*d){
     if(d && getenv("PELOAD_TRACE_TEX")) gl_check_src("glTexImage2D",w,h,fmt,type,d);
-    void(*r)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glTexImage2D"); if(r)r(t,l,ifmt,w,h,b,fmt,type,d);
+    void(*r)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=glp_dlsym("glTexImage2D"); if(r)r(t,l,ifmt,w,h,b,fmt,type,d);
     if(getenv("PELOAD_TRACE_GL")){ char s[160]; snprintf(s,sizeof s,"  [glTexImage2D] ifmt=0x%x %dx%d fmt=0x%x type=0x%x d=%p\n",ifmt,w,h,fmt,type,d); ws(s);} }
 // bytes-per-pixel for the common GL client format/type combos used by glow uploads
 static int gl_bpp(unsigned fmt,unsigned type){
@@ -7189,15 +7213,15 @@ static void gl_check_src(const char*who,int w,int h,unsigned fmt,unsigned type,c
     (void)over; (void)!write(2,s,n); }
 static void MSABI i_glTexSubImage2D(unsigned t,int l,int xo,int yo,int w,int h,unsigned fmt,unsigned type,const void*d){
     if(getenv("PELOAD_TRACE_TEX")) gl_check_src("glTexSubImage2D",w,h,fmt,type,d);
-    void(*r)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glTexSubImage2D"); if(r)r(t,l,xo,yo,w,h,fmt,type,d); }
+    void(*r)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=glp_dlsym("glTexSubImage2D"); if(r)r(t,l,xo,yo,w,h,fmt,type,d); }
 static void MSABI i_glTextureSubImage2D(unsigned tex,int l,int xo,int yo,int w,int h,unsigned fmt,unsigned type,const void*d){
     if(getenv("PELOAD_TRACE_TEX")) gl_check_src("glTextureSubImage2D",w,h,fmt,type,d);
-    void(*r)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glTextureSubImage2D"); if(r)r(tex,l,xo,yo,w,h,fmt,type,d); }
+    void(*r)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=glp_dlsym("glTextureSubImage2D"); if(r)r(tex,l,xo,yo,w,h,fmt,type,d); }
 static void MSABI i_glReadPixels(int x,int y,int w,int h,unsigned fmt,unsigned type,void*d){
     if(getenv("PELOAD_TRACE_TEX")) gl_check_src("glReadPixels(DST)",w,h,fmt,type,d);
-    void(*r)(int,int,int,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glReadPixels"); if(r)r(x,y,w,h,fmt,type,d);
+    void(*r)(int,int,int,int,unsigned,unsigned,void*)=glp_dlsym("glReadPixels"); if(r)r(x,y,w,h,fmt,type,d);
     if(getenv("PELOAD_TRACE_READPX")){ static int n; if((n++%200)==0){ int fb=0,rb=0,vp[4]={0}; unsigned err=0;
-        void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv"); unsigned(*ge)(void)=dlsym(RTLD_DEFAULT,"glGetError");
+        void(*gi)(unsigned,int*)=glp_dlsym("glGetIntegerv"); unsigned(*ge)(void)=glp_dlsym("glGetError");
         if(gi){ gi(0x8CAA,&fb); gi(0x0C02,&rb); gi(0x0BA2,vp); } if(ge) err=ge();
         uint64_t nz=0; if(d && (fmt==0x1908||fmt==0x80E1) && w>0 && h>0){ const uint8_t*q=d; for(long i=0;i<(long)w*h;i+=7) if(q[i*4]|q[i*4+1]|q[i*4+2]|q[i*4+3]) nz++; }
         extern unsigned long g_guest_gl_draws_x, g_guest_gl_idx_x;
@@ -7208,9 +7232,9 @@ static void MSABI i_glReadPixels(int x,int y,int w,int h,unsigned fmt,unsigned t
             for(long i=0;i<(long)w*h;i++){ c[i*4]=c[i*4+1]=c[i*4+2]=c[i*4+3]; } snprintf(pth,sizeof pth,"%s/reclaimer_readpx_alpha.bmp",hm?hm:"/tmp"); bmp_write_rgba(pth,w,h,c); free(c); } } } } }
 static void MSABI i_glGetTexImage(unsigned tgt,int l,unsigned fmt,unsigned type,void*d){
     if(getenv("PELOAD_TRACE_TEX")){ // query the bound texture's level dimensions for the size check
-        void(*gl)(unsigned,int,unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetTexLevelParameteriv");
+        void(*gl)(unsigned,int,unsigned,int*)=glp_dlsym("glGetTexLevelParameteriv");
         int w=0,h=0; if(gl){ gl(tgt,l,0x1000/*TEX_WIDTH*/,&w); gl(tgt,l,0x1001/*TEX_HEIGHT*/,&h);} gl_check_src("glGetTexImage(DST)",w,h,fmt,type,d); }
-    void(*r)(unsigned,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glGetTexImage"); if(r)r(tgt,l,fmt,type,d); }
+    void(*r)(unsigned,int,unsigned,unsigned,void*)=glp_dlsym("glGetTexImage"); if(r)r(tgt,l,fmt,type,d); }
 static void gl_capture(const char*tag); // fwd
 static void gl_capture_wh(const char*tag,int w,int h,int isfbo); // fwd
 // Resolve-capture: blit the current draw FBO (possibly multisample) into our own
@@ -7219,16 +7243,16 @@ static void gl_capture_wh(const char*tag,int w,int h,int isfbo); // fwd
 static unsigned g_capfbo, g_captex; static int g_capinit;
 static void gl_capture_resolve(void){
     static int ncap; if(ncap>400) return;
-    void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv");
-    void(*gf)(int,unsigned*)=dlsym(RTLD_DEFAULT,"glGenFramebuffers");
-    void(*gt)(int,unsigned*)=dlsym(RTLD_DEFAULT,"glGenTextures");
-    void(*bt)(unsigned,unsigned)=dlsym(RTLD_DEFAULT,"glBindTexture");
-    void(*ti)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glTexImage2D");
-    void(*bf)(unsigned,unsigned)=dlsym(RTLD_DEFAULT,"glBindFramebuffer");
-    void(*ft)(unsigned,unsigned,unsigned,unsigned,int)=dlsym(RTLD_DEFAULT,"glFramebufferTexture2D");
-    void(*bl)(int,int,int,int,int,int,int,int,unsigned,unsigned)=dlsym(RTLD_DEFAULT,"glBlitFramebuffer");
-    void(*rp)(int,int,int,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glReadPixels");
-    void(*rb)(unsigned)=dlsym(RTLD_DEFAULT,"glReadBuffer");
+    void(*gi)(unsigned,int*)=glp_dlsym("glGetIntegerv");
+    void(*gf)(int,unsigned*)=glp_dlsym("glGenFramebuffers");
+    void(*gt)(int,unsigned*)=glp_dlsym("glGenTextures");
+    void(*bt)(unsigned,unsigned)=glp_dlsym("glBindTexture");
+    void(*ti)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=glp_dlsym("glTexImage2D");
+    void(*bf)(unsigned,unsigned)=glp_dlsym("glBindFramebuffer");
+    void(*ft)(unsigned,unsigned,unsigned,unsigned,int)=glp_dlsym("glFramebufferTexture2D");
+    void(*bl)(int,int,int,int,int,int,int,int,unsigned,unsigned)=glp_dlsym("glBlitFramebuffer");
+    void(*rp)(int,int,int,int,unsigned,unsigned,void*)=glp_dlsym("glReadPixels");
+    void(*rb)(unsigned)=glp_dlsym("glReadBuffer");
     if(!gi||!gf||!gt||!bt||!ti||!bf||!ft||!bl||!rp) return;
     int W=1280,H=720; int vp[4]={0,0,0,0}; gi(0x0BA2,vp); if(vp[2]>0&&vp[3]>0){W=vp[2];H=vp[3];} if(W>4096)W=4096; if(H>4096)H=4096;
     int drawfb=0,readfb=0; gi(0x8CA6,&drawfb); gi(0x8CAA,&readfb);
@@ -7252,15 +7276,15 @@ static void gl_capture_resolve(void){
 unsigned long g_guest_gl_draws_x, g_guest_gl_idx_x;   // guest (WGL) draw counters, reported by PELOAD_TRACE_READPX
 #define g_guest_gl_draws g_guest_gl_draws_x
 #define g_guest_gl_idx g_guest_gl_idx_x
-static void MSABI i_glDrawElements(unsigned mode,int count,unsigned type,const void*idx){ void(*r)(unsigned,int,unsigned,const void*)=dlsym(RTLD_DEFAULT,"glDrawElements"); g_guest_gl_draws++; g_guest_gl_idx+=(unsigned long)count;
+static void MSABI i_glDrawElements(unsigned mode,int count,unsigned type,const void*idx){ void(*r)(unsigned,int,unsigned,const void*)=glp_dlsym("glDrawElements"); g_guest_gl_draws++; g_guest_gl_idx+=(unsigned long)count;
     static int st=-1; if(st<0) st=getenv("PELOAD_TRACE_GUESTDRAW")?1:0;
-    if(st && g_guest_gl_draws>=600 && g_guest_gl_draws<612){ void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv"); void(*gf)(unsigned,float*)=dlsym(RTLD_DEFAULT,"glGetFloatv"); unsigned(*ge)(void)=dlsym(RTLD_DEFAULT,"glGetError"); unsigned char(*ie)(unsigned)=dlsym(RTLD_DEFAULT,"glIsEnabled");
+    if(st && g_guest_gl_draws>=600 && g_guest_gl_draws<612){ void(*gi)(unsigned,int*)=glp_dlsym("glGetIntegerv"); void(*gf)(unsigned,float*)=glp_dlsym("glGetFloatv"); unsigned(*ge)(void)=glp_dlsym("glGetError"); unsigned char(*ie)(unsigned)=glp_dlsym("glIsEnabled");
         unsigned e0=ge(); int fb=0,prog=0,vao=0,vp[4]={0},sc[4]={0},tex=0,ab=0,eb=0; gi(0x8CA6,&fb); gi(0x8B8D,&prog); gi(0x85B5,&vao); gi(0x0BA2,vp); gi(0x0C10,sc); gi(0x8069,&tex); gi(0x8894,&ab); gi(0x8895,&eb);
         int scis=ie(0x0C11), blend=ie(0x0BE2), depth=ie(0x0B71), cull=ie(0x0B44), srgb=ie(0x8DB9); int bs=0,bd=0; gi(0x80C9,&bs); gi(0x80C8,&bd); float cm[4]={0}; (void)gf;
-        int loc=-1; int(*gul)(unsigned,const char*)=dlsym(RTLD_DEFAULT,"glGetUniformLocation"); void(*guf)(unsigned,int,float*)=dlsym(RTLD_DEFAULT,"glGetUniformfv"); float ss[4]={-1,-1,-1,-1};
+        int loc=-1; int(*gul)(unsigned,const char*)=glp_dlsym("glGetUniformLocation"); void(*guf)(unsigned,int,float*)=glp_dlsym("glGetUniformfv"); float ss[4]={-1,-1,-1,-1};
         if(gul&&guf&&prog){ loc=gul((unsigned)prog,"u_screen_size"); if(loc>=0) guf((unsigned)prog,loc,ss); }
-        unsigned char cmask[4]={0}; void(*gb)(unsigned,unsigned char*)=dlsym(RTLD_DEFAULT,"glGetBooleanv"); if(gb) gb(0x0C23,cmask);
-        { void(*gbs)(unsigned,long,long,void*)=dlsym(RTLD_DEFAULT,"glGetBufferSubData"); float v[20]={0}; if(gbs&&ab){ gbs(0x8892,0,80,v);
+        unsigned char cmask[4]={0}; void(*gb)(unsigned,unsigned char*)=glp_dlsym("glGetBooleanv"); if(gb) gb(0x0C23,cmask);
+        { void(*gbs)(unsigned,long,long,void*)=glp_dlsym("glGetBufferSubData"); float v[20]={0}; if(gbs&&ab){ gbs(0x8892,0,80,v);
             char m2[300]; int k2=snprintf(m2,sizeof m2,"  [guestvtx] #%lu v0 pos=(%g,%g) uv=(%g,%g) | v1 pos=(%g,%g) | v2 pos=(%g,%g) | v3 pos=(%g,%g)\n",g_guest_gl_draws,v[0],v[1],v[2],v[3],v[5],v[6],v[10],v[11],v[15],v[16]); (void)!write(2,m2,k2); } }
         if(r)r(mode,count,type,idx); unsigned e1=ge();
         char m[400]; int k=snprintf(m,sizeof m,"  [guestdraw] #%lu mode=%u n=%d type=0x%x idx=%p err-before=0x%x after=0x%x fb=%d prog=%d vao=%d tex=%d ab=%d eb=%d vp=%d,%d,%d,%d scissor=%d [%d,%d,%d,%d] blend=%d(src=0x%x dst=0x%x) depth=%d cull=%d srgb=%d cmask=%d%d%d%d u_screen_size=(%g,%g) loc=%d\n",
@@ -7269,21 +7293,21 @@ static void MSABI i_glDrawElements(unsigned mode,int count,unsigned type,const v
     if(getenv("PELOAD_SHOT")) gl_capture_resolve();
     static unsigned long dc; if(getenv("PELOAD_PRESENT") && (dc++ % 200)==0){ present_frontend(); gdi_present_main(); } }
 static void MSABI i_glBlitFramebuffer(int sx0,int sy0,int sx1,int sy1,int dx0,int dy0,int dx1,int dy1,unsigned mask,unsigned filter){
-    void(*r)(int,int,int,int,int,int,int,int,unsigned,unsigned)=dlsym(RTLD_DEFAULT,"glBlitFramebuffer");
+    void(*r)(int,int,int,int,int,int,int,int,unsigned,unsigned)=glp_dlsym("glBlitFramebuffer");
     if(r)r(sx0,sy0,sx1,sy1,dx0,dy0,dx1,dy1,mask,filter);
-    if(getenv("PELOAD_SHOT")){ void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv"); void(*bf)(unsigned,unsigned)=dlsym(RTLD_DEFAULT,"glBindFramebuffer");
+    if(getenv("PELOAD_SHOT")){ void(*gi)(unsigned,int*)=glp_dlsym("glGetIntegerv"); void(*bf)(unsigned,unsigned)=glp_dlsym("glBindFramebuffer");
         int draw=0,read=0; if(gi){gi(0x8CA6/*DRAW_FB_BINDING*/,&draw); gi(0x8CAA/*READ_FB_BINDING*/,&read);}
         if(bf) bf(0x8CA8/*READ_FRAMEBUFFER*/,(unsigned)draw);          // read the blit destination
         int w=dx1-dx0,h=dy1-dy0; if(w<0)w=-w; if(h<0)h=-h; gl_capture_wh("blit-dst",w,h,draw!=0);
         if(bf) bf(0x8CA8,(unsigned)read); }
 }
-static void MSABI i_glFinish(void){ void(*r)(void)=dlsym(RTLD_DEFAULT,"glFinish"); if(r)r(); if(getenv("PELOAD_SHOT")) gl_capture("glFinish"); }
+static void MSABI i_glFinish(void){ void(*r)(void)=glp_dlsym("glFinish"); if(r)r(); if(getenv("PELOAD_SHOT")) gl_capture("glFinish"); }
 // Capture on glClear too: if the engine never reaches a present/draw, at least
 // grab whatever is in the framebuffer each time it clears (self-limited to the
 // gl_capture_wh 10-shot cap). PELOAD_SHOT_CLEAR gates it (separate from SHOT).
-static void MSABI i_glClear(unsigned mask){ void(*r)(unsigned)=dlsym(RTLD_DEFAULT,"glClear"); if(r)r(mask);
+static void MSABI i_glClear(unsigned mask){ void(*r)(unsigned)=glp_dlsym("glClear"); if(r)r(mask);
     if(getenv("PELOAD_SHOT_CLEAR")) gl_capture("glClear"); }
-static void MSABI i_glFlush(void){ void(*r)(void)=dlsym(RTLD_DEFAULT,"glFlush"); if(r)r(); if(getenv("PELOAD_SHOT")) gl_capture("glFlush"); }
+static void MSABI i_glFlush(void){ void(*r)(void)=glp_dlsym("glFlush"); if(r)r(); if(getenv("PELOAD_SHOT")) gl_capture("glFlush"); }
 // GL resolver: real framework fn via thunk, else a NAMED logging no-op stub so
 // a CALL to an unimplemented GL function is visible (not a NULL-deref crash).
 static void* gl_or_missing(const char*name){
@@ -7327,7 +7351,7 @@ static int    MSABI i_wglDeleteContext(void*ctx){ if(ctx)CGLDestroyContext((CGLC
 // version directive in each source string (same length: "130"->"150").
 static void MSABI i_glShaderSource(unsigned shader,int count,const char*const*strs,const int*lens){
     if(getenv("PELOAD_TRACE_GL"))(void)!write(2,"  [glShaderSource] ENTER\n",25);
-    void (*real)(unsigned,int,const char*const*,const int*)=dlsym(RTLD_DEFAULT,"glShaderSource");
+    void (*real)(unsigned,int,const char*const*,const int*)=glp_dlsym("glShaderSource");
     if(!real||count<=0){ if(real) real(shader,count,strs,lens); return; }
     static __thread char *buf; static __thread const char *nstr[64]; static __thread int nlen[64];
     if(!buf) buf=malloc(1<<20); char *w=buf; int nc=count<64?count:64;
@@ -7345,25 +7369,25 @@ static void MSABI i_glShaderSource(unsigned shader,int count,const char*const*st
 // it, then compile — catches the source regardless of how it was uploaded.
 static void MSABI i_glCompileShader(unsigned shader){
     if(getenv("PELOAD_TRACE_GL"))(void)!write(2,"  [glCompileShader] ENTER\n",26);
-    void(*getiv)(unsigned,unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetShaderiv");
-    void(*getsrc)(unsigned,int,int*,char*)=dlsym(RTLD_DEFAULT,"glGetShaderSource");
-    void(*setsrc)(unsigned,int,const char*const*,const int*)=dlsym(RTLD_DEFAULT,"glShaderSource");
+    void(*getiv)(unsigned,unsigned,int*)=glp_dlsym("glGetShaderiv");
+    void(*getsrc)(unsigned,int,int*,char*)=glp_dlsym("glGetShaderSource");
+    void(*setsrc)(unsigned,int,const char*const*,const int*)=glp_dlsym("glShaderSource");
     int len=0; if(getiv) getiv(shader,0x8B88,&len); // GL_SHADER_SOURCE_LENGTH
     if(getsrc&&setsrc&&len>0&&len<(1<<20)){ char*src=malloc(len+1); int got=0; getsrc(shader,len,&got,src); src[got>0?got:0]=0;
         char*v=strstr(src,"#version "); if(v){ char*dd=v+9; while(*dd==' ')dd++;
             if(dd[0]>='1'&&dd[0]<='9'&&dd[1]>='0'&&dd[1]<='9'&&dd[2]>='0'&&dd[2]<='9'){ int ver=(dd[0]-'0')*100+(dd[1]-'0')*10+(dd[2]-'0');
                 if(ver<150){ dd[0]='1';dd[1]='5';dd[2]='0'; const char*a=src; setsrc(shader,1,&a,0); if(getenv("PELOAD_TRACE_GL")){ws("  [glCompileShader] bumped #version ");char n[4]={(char)('0'+ver/100),(char)('0'+ver/10%10),(char)('0'+ver%10),0};ws(n);ws("->150\n");} } } }
         free(src); }
-    void(*real)(unsigned)=dlsym(RTLD_DEFAULT,"glCompileShader"); if(real) real(shader);
-    if(getenv("PELOAD_TRACE_GLSL")){ void(*giv)(unsigned,unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetShaderiv"); void(*gil)(unsigned,int,int*,char*)=dlsym(RTLD_DEFAULT,"glGetShaderInfoLog");
+    void(*real)(unsigned)=glp_dlsym("glCompileShader"); if(real) real(shader);
+    if(getenv("PELOAD_TRACE_GLSL")){ void(*giv)(unsigned,unsigned,int*)=glp_dlsym("glGetShaderiv"); void(*gil)(unsigned,int,int*,char*)=glp_dlsym("glGetShaderInfoLog");
         int ok=1; if(giv) giv(shader,0x8B81,&ok); if(!ok){ char log[1024]={0}; int n=0; if(gil) gil(shader,1024,&n,log); ws("  [SHADER COMPILE FAIL] "); ws(log); ws("\n"); } } }
 static void MSABI i_glLinkProgram(unsigned prog){
-    void(*real)(unsigned)=dlsym(RTLD_DEFAULT,"glLinkProgram"); if(real) real(prog);
-    if(getenv("PELOAD_TRACE_GLSL")){ void(*giv)(unsigned,unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetProgramiv"); void(*gil)(unsigned,int,int*,char*)=dlsym(RTLD_DEFAULT,"glGetProgramInfoLog");
+    void(*real)(unsigned)=glp_dlsym("glLinkProgram"); if(real) real(prog);
+    if(getenv("PELOAD_TRACE_GLSL")){ void(*giv)(unsigned,unsigned,int*)=glp_dlsym("glGetProgramiv"); void(*gil)(unsigned,int,int*,char*)=glp_dlsym("glGetProgramInfoLog");
         int ok=1; if(giv) giv(prog,0x8B82,&ok); if(!ok){ char log[1024]={0}; int n=0; if(gil) gil(prog,1024,&n,log); ws("  [PROGRAM LINK FAIL] "); ws(log); ws("\n"); } else ws("  [program linked ok]\n"); } }
 // glCreateShaderProgramv: separable-program one-call compile; rewrite #version.
 static unsigned MSABI i_glCreateShaderProgramv(unsigned type,int count,const char*const*strs){
-    unsigned(*real)(unsigned,int,const char*const*)=dlsym(RTLD_DEFAULT,"glCreateShaderProgramv");
+    unsigned(*real)(unsigned,int,const char*const*)=glp_dlsym("glCreateShaderProgramv");
     if(!real) return 0; if(count<=0) return real(type,count,strs);
     static __thread char *buf; static __thread const char *ns[32]; if(!buf) buf=malloc(1<<20); char *w=buf; int nc=count<32?count:32;
     for(int i=0;i<nc;i++){ const char*s=strs[i]; int L=(int)strlen(s); if(w+L+1>buf+(1<<20)){ns[i]=s;continue;} memcpy(w,s,L); w[L]=0;
@@ -7378,8 +7402,8 @@ static int    MSABI i_wglSwapIntervalEXT(int i){ (void)i; return 1; }
 // currently-bound GL_READ_FRAMEBUFFER (caller sets it up).
 static void gl_capture_wh(const char*tag,int w,int h,int isfbo){
     static int nshot; if(nshot>=10) return;
-    void(*rp)(int,int,int,int,unsigned,unsigned,void*)=dlsym(RTLD_DEFAULT,"glReadPixels");
-    void(*rb)(unsigned)=dlsym(RTLD_DEFAULT,"glReadBuffer");
+    void(*rp)(int,int,int,int,unsigned,unsigned,void*)=glp_dlsym("glReadPixels");
+    void(*rb)(unsigned)=glp_dlsym("glReadBuffer");
     if(!rp||w<=0||h<=0||(long)w*h>40000000) return;
     unsigned char*px=calloc(1,(size_t)w*h*4); if(!px) return;
     gl_err(); if(rb) rb(isfbo?0x8CE0/*COLOR_ATTACHMENT0*/:0x0405/*GL_BACK*/);
@@ -7392,7 +7416,7 @@ static void gl_capture_wh(const char*tag,int w,int h,int isfbo){
         for(int i=0;i<w*h;i++){ uint8_t*p=px+i*4; uint8_t bgra[4]={p[2],p[1],p[0],p[3]}; fwrite(bgra,1,4,f); } fclose(f);
         char m[600]; snprintf(m,sizeof m,"  [gl_capture] %s %dx%d err=0x%x -> %s\n",tag,w,h,e,path); ws(m); }
     free(px); }
-static void gl_capture(const char*tag){ void(*gi)(unsigned,int*)=dlsym(RTLD_DEFAULT,"glGetIntegerv"); int vp[4]={0,0,1280,720}; if(gi)gi(0x0BA2,vp); gl_capture_wh(tag,vp[2]>0?vp[2]:1280,vp[3]>0?vp[3]:720,0); }
+static void gl_capture(const char*tag){ void(*gi)(unsigned,int*)=glp_dlsym("glGetIntegerv"); int vp[4]={0,0,1280,720}; if(gi)gi(0x0BA2,vp); gl_capture_wh(tag,vp[2]>0?vp[2]:1280,vp[3]>0?vp[3]:720,0); }
 static int    MSABI i_SwapBuffers(void*hdc){ (void)hdc;
     if(getenv("PELOAD_SHOT")) gl_capture("SwapBuffers");
     if(g_nsctx){ om0(g_nsctx,"flushBuffer"); return 1; }
