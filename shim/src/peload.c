@@ -7694,16 +7694,26 @@ static void MSABI i_AcquireSRWLockShared(void*l){ pthread_rwlock_rdlock(srw(l));
 static void MSABI i_ReleaseSRWLockShared(void*l){ pthread_rwlock_unlock(srw(l)); }
 static uint8_t MSABI i_TryAcquireSRWLockExclusive(void*l){ return pthread_rwlock_trywrlock(srw(l))==0; }
 static uint8_t MSABI i_TryAcquireSRWLockShared(void*l){ return pthread_rwlock_tryrdlock(srw(l))==0; }
-static pthread_cond_t* cvar(void*cv){ pthread_cond_t*c=*(void**)cv; if(!c){ pthread_mutex_lock(&g_lazy); c=*(void**)cv; if(!c){ c=malloc(sizeof *c); pthread_cond_init(c,0); *(void**)cv=c; } pthread_mutex_unlock(&g_lazy); } return c; }
+// CONDITION_VARIABLE -> a condvar + its own mutex. An SRW wait must release the SRW lock and start waiting as one step
+// (Windows does): it takes the mutex BEFORE unlocking the SRW lock and Wake* signal under it, so a wake between the
+// two can't be lost. (It used to unlock the SRW lock first, then wait on a global mutex Wake* never took: a waker in
+// that gap was lost and an INFINITE wait slept forever -- msvcp140's std::condition_variable waits here.)
+typedef struct { pthread_cond_t c; pthread_mutex_t m; } WinCv;
+static WinCv* cvar(void*cv){ WinCv*c=*(void**)cv; if(!c){ pthread_mutex_lock(&g_lazy); c=*(void**)cv; if(!c){ c=malloc(sizeof *c); pthread_cond_init(&c->c,0); pthread_mutex_init(&c->m,0); *(void**)cv=c; } pthread_mutex_unlock(&g_lazy); } return c; }
 static void MSABI i_InitializeConditionVariable(void*cv){ *(void**)cv=0; }
-static void MSABI i_WakeConditionVariable(void*cv){ pthread_cond_signal(cvar(cv)); }
-static void MSABI i_WakeAllConditionVariable(void*cv){ pthread_cond_broadcast(cvar(cv)); }
-static int  MSABI i_SleepConditionVariableCS(void*cv,void*cs,uint32_t ms){ pthread_cond_t*c=cvar(cv); pthread_mutex_t*m=cs_m(cs);
-    if(ms==0xFFFFFFFF) return pthread_cond_wait(c,m)==0; struct timeval tv;gettimeofday(&tv,0);struct timespec ts;uint64_t ns=(uint64_t)tv.tv_usec*1000+(uint64_t)ms*1000000ULL;ts.tv_sec=tv.tv_sec+ns/1000000000ULL;ts.tv_nsec=ns%1000000000ULL; return pthread_cond_timedwait(c,m,&ts)!=ETIMEDOUT; }
-static int  MSABI i_SleepConditionVariableSRW(void*cv,void*l,uint32_t ms,uint32_t fl){ pthread_cond_t*c=cvar(cv); pthread_rwlock_t*r=srw(l); int shared=(fl&1);
-    pthread_rwlock_unlock(r); pthread_mutex_lock(&g_lazy); int rc;
-    if(ms==0xFFFFFFFF) rc=pthread_cond_wait(c,&g_lazy); else { struct timeval tv;gettimeofday(&tv,0);struct timespec ts;uint64_t ns=(uint64_t)tv.tv_usec*1000+(uint64_t)ms*1000000ULL;ts.tv_sec=tv.tv_sec+ns/1000000000ULL;ts.tv_nsec=ns%1000000000ULL; rc=pthread_cond_timedwait(c,&g_lazy,&ts); }
-    pthread_mutex_unlock(&g_lazy); if(shared) pthread_rwlock_rdlock(r); else pthread_rwlock_wrlock(r); return rc!=ETIMEDOUT; }
+static void MSABI i_WakeConditionVariable(void*cv){ WinCv*c=cvar(cv); pthread_mutex_lock(&c->m); pthread_cond_signal(&c->c); pthread_mutex_unlock(&c->m); }
+static void MSABI i_WakeAllConditionVariable(void*cv){ WinCv*c=cvar(cv); pthread_mutex_lock(&c->m); pthread_cond_broadcast(&c->c); pthread_mutex_unlock(&c->m); }
+static void cv_deadline(uint32_t ms,struct timespec*ts){ struct timeval tv; gettimeofday(&tv,0); uint64_t ns=(uint64_t)tv.tv_usec*1000+(uint64_t)ms*1000000ULL; ts->tv_sec=tv.tv_sec+(time_t)(ns/1000000000ULL); ts->tv_nsec=(long)(ns%1000000000ULL); }
+// both return FALSE + ERROR_TIMEOUT (1460) on timeout, as Windows does
+static int  MSABI i_SleepConditionVariableCS(void*cv,void*cs,uint32_t ms){ WinCv*c=cvar(cv); pthread_mutex_t*m=cs_m(cs); int rc;
+    if(ms==0xFFFFFFFF) rc=pthread_cond_wait(&c->c,m); else { struct timespec ts; cv_deadline(ms,&ts); rc=pthread_cond_timedwait(&c->c,m,&ts); }
+    if(rc==ETIMEDOUT){ g_lasterr=1460; return 0; } return 1; }
+static int  MSABI i_SleepConditionVariableSRW(void*cv,void*l,uint32_t ms,uint32_t fl){ WinCv*c=cvar(cv); pthread_rwlock_t*r=srw(l); int shared=(fl&1), rc;
+    pthread_mutex_lock(&c->m); pthread_rwlock_unlock(r);
+    if(ms==0xFFFFFFFF) rc=pthread_cond_wait(&c->c,&c->m); else { struct timespec ts; cv_deadline(ms,&ts); rc=pthread_cond_timedwait(&c->c,&c->m,&ts); }
+    pthread_mutex_unlock(&c->m);   // before blocking on the SRW lock: its holder may be about to Wake us
+    if(shared) pthread_rwlock_rdlock(r); else pthread_rwlock_wrlock(r);
+    if(rc==ETIMEDOUT){ g_lasterr=1460; return 0; } return 1; }
 // WaitOnAddress / WakeByAddress*: the Windows futex. Rust's std::sync (Mutex,
 // RwLock, Condvar, Once, thread::park) uses these on Windows 8+; no-ops here
 // meant Rust locks never actually waited -> data races -> heap corruption and
