@@ -160,6 +160,35 @@ static void  unix2win_ex(const char*, uint16_t*, int, int);   // fwd
 static void  fd_record(int, const char*);             // fwd
 static void  mkparents(const char*);                  // fwd
 static void  rmrf(const char*);                       // fwd
+// UTF-16 (Windows names) <-> UTF-8 (macOS paths and the UTF-8 ANSI code page GetACP reports), surrogate pairs
+// included; bad input becomes U+FFFD. Paths, directory listings and Multi/WideChar conversions used to keep only
+// ASCII (other characters became '?', UTF-8 bytes were widened one by one), so a non-ASCII name failed to open.
+// *_n: n input units (-1 = up to and including the NUL); o=0 -> just count; returns the units written/needed, or
+// -1 when cap is too small. A sequence that doesn't fit is never split.
+static int w2u8_n(const uint16_t*w,int n,char*o,int cap){ int k=0; if(n<0){ n=0; while(w[n]) n++; n++; }
+    for(int i=0;i<n;i++){ uint32_t c=w[i];
+        if(c>=0xD800 && c<0xDC00 && i+1<n && w[i+1]>=0xDC00 && w[i+1]<0xE000){ c=0x10000+((c-0xD800)<<10)+(w[i+1]-0xDC00); i++; }
+        else if(c>=0xD800 && c<0xE000) c=0xFFFD;
+        int m=c<0x80?1:c<0x800?2:c<0x10000?3:4;
+        if(o){ if(k+m>cap) return -1; char*q=o+k;
+            if(m==1) q[0]=(char)c;
+            else if(m==2){ q[0]=(char)(0xC0|c>>6); q[1]=(char)(0x80|(c&0x3F)); }
+            else if(m==3){ q[0]=(char)(0xE0|c>>12); q[1]=(char)(0x80|((c>>6)&0x3F)); q[2]=(char)(0x80|(c&0x3F)); }
+            else { q[0]=(char)(0xF0|c>>18); q[1]=(char)(0x80|((c>>12)&0x3F)); q[2]=(char)(0x80|((c>>6)&0x3F)); q[3]=(char)(0x80|(c&0x3F)); } }
+        k+=m; }
+    return k; }
+static int u82w_n(const char*s,int n,uint16_t*o,int cap){ const uint8_t*p=(const uint8_t*)s,*e; int k=0; if(n<0) n=(int)strlen(s)+1; e=p+n;
+    while(p<e){ uint32_t c=*p; int m=c<0x80?0:(c&0xE0)==0xC0?1:(c&0xF0)==0xE0?2:(c&0xF8)==0xF0?3:-1; p++;
+        if(m<0) c=0xFFFD; else if(m){ c&=0x3F>>m; for(int j=0;j<m;j++){ if(p>=e || (*p&0xC0)!=0x80){ c=0xFFFD; break; } c=(c<<6)|(*p++&0x3F); } }
+        int u=c>=0x10000?2:1;
+        if(o){ if(k+u>cap) return -1; if(u==2){ uint32_t d=c-0x10000; o[k]=(uint16_t)(0xD800+(d>>10)); o[k+1]=(uint16_t)(0xDC00+(d&0x3FF)); } else o[k]=(uint16_t)c; }
+        k+=u; }
+    return k; }
+// NUL-terminated wrappers: convert as much as fits (whole characters) and always terminate; return the length
+static int w2u8(const uint16_t*w,char*o,int cap){ if(cap<1) return 0; int n=0; if(w) while(w[n]) n++;
+    while(n>0 && w2u8_n(w,n,o,cap-1)<0) n--; int k=n>0?w2u8_n(w,n,o,cap-1):0; o[k]=0; return k; }
+static int u82w(const char*s,uint16_t*o,int cap){ if(cap<1) return 0; int n=s?(int)strlen(s):0;
+    while(n>0 && u82w_n(s,n,o,cap-1)<0) n--; int k=n>0?u82w_n(s,n,o,cap-1):0; o[k]=0; return k; }
 static char  g_cmdlineA[2048];                        // fwd (full guest cmdline)
 static void* g_present_glctx; static int g_present_started; // fwd (hold-window present thread)
 
@@ -2790,10 +2819,18 @@ static uint32_t MSABI i_GetACP(void){ return 65001; }
 static int    MSABI i_GetModuleHandleExW(uint32_t fl, void *name, void **out){
     if(fl&0x4){ uint8_t*m=guest_mod_by_addr((uint64_t)name); if(out)*out=m; if(!m){ g_lasterr=126; return 0; } return 1; }
     void*m= name? i_GetModuleHandleW((uint16_t*)name) : g_base; if(out)*out=m; return m!=0; }
+// UTF-8 for CP_ACP/OEMCP/MACCP/THREAD_ACP (GetACP is 65001) and CP_UTF8; other code pages as Latin-1. A too-small
+// output buffer fails with ERROR_INSUFFICIENT_BUFFER (122), as on Windows (it used to be truncated silently).
+static int cp_utf8(uint32_t cp){ return cp<=3 || cp==65001; }
 static int    MSABI i_MultiByteToWideChar(uint32_t cp,uint32_t fl,const char*s,int sl,uint16_t*w,int wl){
-    (void)cp;(void)fl; int n= sl<0? (int)strlen(s)+1 : sl; if(!w||wl==0) return n; int i=0; for(;i<n&&i<wl;i++) w[i]=(uint8_t)s[i]; return i; }
+    (void)fl; if(!s || sl==0){ g_lasterr=87; return 0; } int n= sl<0? (int)strlen(s)+1 : sl;
+    if(cp_utf8(cp)){ int k=u82w_n(s,n,wl?w:0,wl); if(k<0){ g_lasterr=122; return 0; } return k; }
+    if(!w||wl==0) return n; if(wl<n){ g_lasterr=122; return 0; } for(int i=0;i<n;i++) w[i]=(uint8_t)s[i]; return n; }
 static int    MSABI i_WideCharToMultiByte(uint32_t cp,uint32_t fl,const uint16_t*w,int wl,char*s,int sl,const char*df,int*du){
-    (void)cp;(void)fl;(void)df;(void)du; int n= wl<0? 0:wl; if(wl<0){ while(w[n]) n++; n++; } if(!s||sl==0) return n; int i=0; for(;i<n&&i<sl;i++) s[i]=(char)(w[i]<128?w[i]:'?'); return i; }
+    (void)fl;(void)df; if(du)*du=0; if(!w || wl==0){ g_lasterr=87; return 0; } int n= wl<0? 0:wl; if(wl<0){ while(w[n]) n++; n++; }
+    if(cp_utf8(cp)){ int k=w2u8_n(w,n,sl?s:0,sl); if(k<0){ g_lasterr=122; return 0; } return k; }
+    if(!s||sl==0) return n; if(sl<n){ g_lasterr=122; return 0; }
+    for(int i=0;i<n;i++){ s[i]=(char)(w[i]<256?w[i]:'?'); if(w[i]>=256 && du) *du=1; } return n; }
 static void   MSABI i_GetSystemInfo(void *si){ if(si){ memset(si,0,48); *(uint32_t*)((char*)si+4)=4096; *(uint32_t*)((char*)si+32)=1; *(uint32_t*)((char*)si+36)=4096; } }
 static void   MSABI i_ExitProcess(uint32_t c){
     { char t[96]; int k=snprintf(t,sizeof t,"  [i_ExitProcess] code=%u present_started=%d hold=%d\n",c,g_present_started,getenv("PELOAD_HOLD_WINDOW")?1:0); (void)!write(2,t,k); }
@@ -2826,9 +2863,9 @@ static void   MSABI i_GetStartupInfoW(void *si){ if(si){ memset(si,0,104); *(uin
 static void   MSABI i_GetStartupInfoA(void *si){ if(si){ memset(si,0,104); *(uint32_t*)si=104; } }
 static int    MSABI i_HeapSetInformation(void*h,int cls,void*info,uint64_t len){ (void)h;(void)cls;(void)info;(void)len; return 1; }
 static int    MSABI i_SetEnvironmentVariableW(const uint16_t*n,const uint16_t*v){
-    char nm[256]; int i=0; for(; n&&n[i]&&i<255;i++) nm[i]=(char)(n[i]<128?n[i]:'?'); nm[i]=0;
+    char nm[256]; w2u8(n,nm,sizeof nm);
     if(!v){ unsetenv(nm); return 1; }
-    char val[2048]; int j=0; for(; v[j]&&j<2047;j++) val[j]=(char)(v[j]<128?v[j]:'?'); val[j]=0;
+    char val[2048]; w2u8(v,val,sizeof val);
     setenv(nm,val,1); if(getenv("PELOAD_TRACE_ENV")){ws("  [SetEnv] ");ws(nm);ws("=");ws(val);ws("\n");} return 1; }
 static void*  MSABI i_SetStdHandle(uint32_t id,void*h){ (void)id; return h; } // accept redirection
 // CreateProcessW: launch the engine worker UNDER the loader. The worker is a
@@ -2857,9 +2894,9 @@ static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*t
     // onto our environ so the posix_spawn'd worker inherits it. UTF-16 when
     // CREATE_UNICODE_ENVIRONMENT (0x400); double-NUL terminated.
     if(env){ int uni = (flags & 0x400)!=0;
-        if(uni){ const uint16_t *w=env; while(*w){ char nm[256],val[4096]; int i=0;
-            while(*w && *w!='=' && i<255){ nm[i++]=(char)(*w<128?*w:'?'); w++; } nm[i]=0; if(*w=='=')w++;
-            int j=0; while(*w && j<4095){ val[j++]=(char)(*w<128?*w:'?'); w++; } val[j]=0; w++;
+        if(uni){ const uint16_t *w=env; while(*w){ char nm[256],val[4096];   // NAME=VALUE (UTF-16 -> UTF-8)
+            int L=0; while(w[L]) L++; int e=1; while(e<L && w[e]!='=') e++;   // a leading '=' belongs to the name (=C: drive vars)
+            int a=w2u8_n(w,e,nm,255); nm[a<0?0:a]=0; int b=e<L?w2u8_n(w+e+1,L-e-1,val,4095):0; val[b<0?0:b]=0; w+=L+1;
             if(nm[0]) setenv(nm,val,1); if(getenv("PELOAD_TRACE_ENV")){ws("  [childenv] ");ws(nm);ws("=");ws(val);ws("\n");} } }
         else { const char *c=env; while(*c){ char nm[256],val[4096]; int i=0;
             while(*c && *c!='=' && i<255) nm[i++]=*c++; nm[i]=0; if(*c=='=')c++;
@@ -2876,12 +2913,12 @@ static int MSABI i_CreateProcessW(const uint16_t*app,uint16_t*cmd,void*pa,void*t
     char exe[2048]={0};
     if(app) win2unix(app,exe,sizeof exe);
     else if(cmd){ // first token of the command line, honoring quotes
-        char c[4096]; int n=0; for(; cmd[n]&&n<4095;n++) c[n]=(char)(cmd[n]<128?cmd[n]:'?'); c[n]=0;
+        char c[4096]; w2u8(cmd,c,sizeof c);
         char *p=c, *e; if(*p=='"'){ p++; e=strchr(p,'"'); } else { e=strchr(p,' '); } if(e)*e=0;
         uint16_t w[1024]; int i=0; for(; p[i]&&i<1023;i++) w[i]=(uint8_t)p[i]; w[i]=0; win2unix(w,exe,sizeof exe);
     }
     // narrow command line (for logging + to append as a single arg)
-    char cl[4096]={0}; if(cmd){ int n=0; for(; cmd[n]&&n<4095;n++) cl[n]=(char)(cmd[n]<128?cmd[n]:'?'); cl[n]=0; }
+    char cl[4096]={0}; if(cmd) w2u8(cmd,cl,sizeof cl);
     ws("  [CreateProcessW] exe="); ws(exe[0]?exe:"(from cmdline)"); ws("\n    cmd="); ws(cl); ws("\n");
     // Dump the RECLAIMER_* handshake env the worker inherits (mode is encoded here, not argv).
     if(getenv("PELOAD_TRACE_ENV")){ extern char**environ; for(char**e=environ;*e;e++) if(!strncmp(*e,"RECLAIMER_",10)){ ws("    [penv] "); ws(*e); ws("\n"); } }
@@ -2970,7 +3007,7 @@ static uint16_t* build_env_block_w(void){
     uint16_t *blk=(uint16_t*)malloc((need+1)*sizeof(uint16_t)); if(!blk) return 0;
     size_t o=0;
     for(char**e=environ; e&&*e; e++){ const char*s=*e; if(s[0]=='=') continue; // skip drive-cwd pseudo-vars
-        for(const char*p=s; *p; p++) blk[o++]=(uint8_t)*p; blk[o++]=0; }
+        int k=u82w_n(s,(int)strlen(s),blk+o,(int)(need-o)); if(k>0) o+=(size_t)k; blk[o++]=0; }   // UTF-8 -> UTF-16 (never more units than bytes)
     blk[o++]=0; // extra terminating NUL
     return blk;
 }
@@ -3016,7 +3053,7 @@ static uint32_t MSABI i_SetConsoleMode(void*h,uint32_t m){ (void)h;(void)m; retu
 static int MSABI i_SetThreadStackGuarantee(uint32_t*s){ (void)s; return 1; }
 static int MSABI i_FreeLibrary(void*h){ (void)h; return 1; }
 static uint32_t MSABI i_GetModuleFileNameA(void*m,char*buf,uint32_t sz){ uint32_t i=0;
-    { const char*mp=guest_mod_path(m); if(mp && sz){ uint16_t w[1024]; unix2win_ex(mp,w,1024,1); for(; i<sz && w[i]; i++) buf[i]=(char)(w[i]<128?w[i]:'?'); if(i<sz) buf[i]=0; else buf[sz-1]=0; return i; } } for(; i<sz && g_exewinA[i]; i++) buf[i]=g_exewinA[i]; if(i<sz) buf[i]=0; return i; }
+    { const char*mp=guest_mod_path(m); if(mp && sz){ uint16_t w[1024]; unix2win_ex(mp,w,1024,1); char u[2048]; int k=w2u8(w,u,sizeof u); for(; i<sz && i<(uint32_t)k; i++) buf[i]=u[i]; if(i<sz) buf[i]=0; else buf[sz-1]=0; return i; } } for(; i<sz && g_exewinA[i]; i++) buf[i]=g_exewinA[i]; if(i<sz) buf[i]=0; return i; }
 static uint32_t MSABI i_GetConsoleOutputCP(void){ return 65001; }
 // Fault/exception-handler registration: return non-null so the engine's
 // "install worker fault handler" succeeds. (Actual Win64 SEH dispatch is a
@@ -7921,11 +7958,11 @@ static int MSABI i_GetFileInformationByHandleEx(void*h,int cls,void*info,uint32_
         uint8_t *b=info; if(sz>700) sz=700; memset(b,0,sz);
         int nameoff=(cls==10||cls==11)?104:68;
         *(uint32_t*)(b+56) = (have&&S_ISDIR(es.st_mode))?0x10:0x80;      // FileAttributes
-        int nl=0; while(de->d_name[nl]) nl++;
+        uint16_t wn[300]; int nl=u82w(de->d_name,wn,300);
+        if(nameoff+2*nl>(int)sz) nl=((int)sz-nameoff)/2; if(nl<0) nl=0;
         *(uint32_t*)(b+60) = (uint32_t)(nl*2);                           // FileNameLength (bytes)
         if(have){ *(int64_t*)(b+40)=es.st_size; *(int64_t*)(b+48)=es.st_size; if(cls==10||cls==11) *(int64_t*)(b+96)=(int64_t)es.st_ino; }
-        uint16_t *nm=(uint16_t*)(b+nameoff);
-        for(int i=0;i<nl && nameoff+2*(i+1)<=(int)sz;i++) nm[i]=(uint8_t)de->d_name[i];
+        memcpy(b+nameoff,wn,(size_t)nl*2);
         return 1; // NextEntryOffset already 0
     }
     memset(info,0,sz); return 1;
@@ -7990,7 +8027,7 @@ static int MSABI i_SetFileInformationByHandle(void*h,int cls,void*info,uint32_t 
         if(p[0] && p[1]==':'){ win2unix(p,newp,sizeof newp); }       // absolute drive path
         else { // relative to the old file's directory
             char d[2048]; snprintf(d,sizeof d,"%s",g_fdpath[fd]); char*sl=strrchr(d,'/'); if(sl)*sl=0; else d[0]=0;
-            char rel[1600]; int j=0; for(int i=0;p[i]&&j<1599;i++){ char c=(char)(p[i]<128?p[i]:'?'); rel[j++]=(c=='\\')?'/':c; } rel[j]=0;
+            char rel[1600]; w2u8(p,rel,sizeof rel); for(char*q=rel;*q;q++) if(*q=='\\') *q='/';
             snprintf(newp,sizeof newp,"%s/%s",d,rel);
         }
         int rr=rename(g_fdpath[fd],newp);
@@ -8033,7 +8070,7 @@ static int afd_is_device_name(const char*name);
 static void* afd_make_device(void);
 static int nt_open_common(void **ph,uint32_t acc,void *oa,void *iosb,uint32_t disp,uint32_t opts){
     uint8_t *OA=oa; void *root = OA? *(void**)(OA+8) : 0; uint8_t *uni = OA? *(uint8_t**)(OA+16) : 0;
-    char name[1600]={0}; if(uni){ uint16_t len=*(uint16_t*)uni; uint16_t *bufw=*(uint16_t**)(uni+8); int n=len/2,j=0; for(int i=0;i<n&&j<1599;i++){ char c=(char)(bufw[i]<128?bufw[i]:'?'); name[j++]=c;} name[j]=0; }
+    char name[1600]={0}; if(uni){ uint16_t len=*(uint16_t*)uni; uint16_t *bufw=*(uint16_t**)(uni+8); int n=len/2; while(n>0 && w2u8_n(bufw,n,name,1599)<0) n--; int k=n>0?w2u8_n(bufw,n,name,1599):0; name[k]=0; }
     for(char*q=name;*q;q++) if(*q=='\\') *q='/';
     // anon_pipe: client reopen (RootDirectory is a pipe-server fd) -> return the socketpair mate.
     { intptr_t rv=(intptr_t)root; if(rv>=0x1000){ int rfd=(int)(rv-0x1000); if(rfd>=0&&rfd<MAXFD&&g_pipe_other[rfd]){
@@ -8069,7 +8106,7 @@ static int MSABI i_NtCreateFile(void **ph,uint32_t acc,void *oa,void *iosb,void 
 static int MSABI i_NtOpenFile(void **ph,uint32_t acc,void *oa,void *iosb,uint32_t share,uint32_t opts){
     (void)share;
     if(getenv("PELOAD_TRACE_FS")){ uint8_t*OA=oa; uint8_t*uni=OA?*(uint8_t**)(OA+16):0; char nm[256]={0};
-        if(uni){ uint16_t ln=*(uint16_t*)uni; uint16_t*bw=*(uint16_t**)(uni+8); int n=ln/2,j=0; for(int i=0;i<n&&j<255;i++){char c=(char)(bw[i]<128?bw[i]:'?'); nm[j++]=c;} nm[j]=0; }
+        if(uni){ uint16_t ln=*(uint16_t*)uni; uint16_t*bw=*(uint16_t**)(uni+8); int n=ln/2; while(n>0 && w2u8_n(bw,n,nm,255)<0) n--; int k=n>0?w2u8_n(bw,n,nm,255):0; nm[k]=0; }
         char b[320]; int k=snprintf(b,sizeof b,"  [NtOpenFile entry] root=%p name='%s'\n",OA?*(void**)(OA+8):0,nm); (void)!write(2,b,k); }
     return nt_open_common(ph,acc,oa,iosb,1 /*FILE_OPEN*/,opts);
 }
@@ -8197,7 +8234,7 @@ static int no_waves_dll(const uint16_t*n){ static int on=-1; if(on<0) on=getenv(
     return strcasestr(a,"\\waves\\")!=0; }
 static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
     if(no_waves_dll(name)){ g_lasterr=126; ws("  [no-waves] refused a Waves DLL\n"); return 0; }
-    (void)h;(void)fl; char w[2048]; int i=0; for(; name && name[i] && i<2047; i++) w[i]=(char)(name[i]<128?name[i]:'?'); w[i]=0;
+    (void)h;(void)fl; char w[2048]; int i=0; if(name) i=w2u8(name,w,sizeof w); else w[0]=0;
     // bare short name of the DLL (for the module registry + dedupe)
     char *bn=w; for(char*p=w;*p;p++) if(*p=='\\'||*p=='/') bn=p+1;
     snprintf(g_lastlib,sizeof g_lastlib,"%s",bn);
@@ -8221,11 +8258,11 @@ static void unix2win_ex(const char *u, uint16_t *out, int cap, int plain){
     if(!strncmp(u,g_drivec,dl)) snprintf(w,sizeof w,"%sC:%s", pre, u+dl);
     else snprintf(w,sizeof w,"%sZ:%s", pre, u);
     for(char*p=w;*p;p++) if(*p=='/') *p='\\';
-    int i=0; for(; w[i] && i<cap-1; i++) out[i]=(uint8_t)w[i]; out[i]=0;
+    u82w(w,out,cap);
 }
 static void unix2win(const char *u, uint16_t *out, int cap){ unix2win_ex(u,out,cap,0); }
 static char* win2unix(const uint16_t *w, char *out, int outsz){
-    char t[2048]; int n=0; for(; w && w[n] && n<2047; n++) t[n]=(char)(w[n]<128?w[n]:'?'); t[n]=0;
+    char t[2048]; w2u8(w,t,sizeof t);
     // strip \\?\ long-path prefix
     char *s=t; if(!strncmp(s,"\\\\?\\",4)) s+=4;
     for(char *p=s; *p; p++) if(*p=='\\') *p='/';
@@ -8465,7 +8502,7 @@ static void pipe_sockpath(const char*name,char*out,size_t osz){ const char*t=pip
 static int pipe_is(intptr_t hv){ return hv>0x100000 && !((hv)&3) && ((PipeObj*)hv)->magic==PIPE_MAGIC; }
 static void* MSABI i_CreateNamedPipeW(const uint16_t*w,uint32_t openMode,uint32_t pipeMode,uint32_t maxInst,uint32_t outBuf,uint32_t inBuf,uint32_t timeout,void*sec){
     (void)openMode;(void)pipeMode;(void)maxInst;(void)outBuf;(void)inBuf;(void)timeout;(void)sec;
-    char nm[1024]; int i=0; for(; w&&w[i]&&i<1023;i++) nm[i]=(char)(w[i]<128?w[i]:'?'); nm[i]=0;
+    char nm[1024]; int i=w?w2u8(w,nm,sizeof nm):0; nm[i]=0;
     PipeObj*o=calloc(1,sizeof *o); if(!o) return (void*)-1; o->magic=PIPE_MAGIC; o->listenfd=-1; o->connfd=-1; o->is_server=1;
     pipe_sockpath(nm,o->sp,sizeof o->sp);
     int fd=socket(AF_UNIX,SOCK_STREAM,0); if(fd<0){ free(o); g_lasterr=win_err(); return (void*)-1; }
@@ -8493,7 +8530,7 @@ static int pipe_read(void*h,void*buf,uint32_t n,uint32_t*rd){ PipeObj*o=h; int f
 static int pipe_close(void*h){ PipeObj*o=h; if(o->connfd>=0)close(o->connfd); if(o->listenfd>=0){ close(o->listenfd); if(o->is_server)unlink(o->sp);} o->magic=0; free(o); return 1; }
 static void*  MSABI i_CreateFileW(const uint16_t *w,uint32_t acc,uint32_t share,void*sec,uint32_t disp,uint32_t fl,void*tmpl){
     (void)share;(void)sec;(void)fl;(void)tmpl; char p[2048]; win2unix(w,p,sizeof p);
-    { char nn[1024]; int i=0; for(; w&&w[i]&&i<1023;i++) nn[i]=(char)(w[i]<128?w[i]:'?'); nn[i]=0;
+    { char nn[1024]; int i=w?w2u8(w,nn,sizeof nn):0; nn[i]=0;
       if(pipe_name_is(nn)) return pipe_client_open(nn); }
     if((!w||!w[0])){
         if(getenv("PELOAD_TRACE_EMPTY")){ ws("  [CFW EMPTY-PATH caller chain]\n"); uint64_t *sp=(uint64_t*)__builtin_frame_address(0);
@@ -8612,11 +8649,11 @@ static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h;
     close(fd); } return 1; }
 // env var lookup via the host environment (so RECLAIMER_* pass through)
 static uint32_t MSABI i_GetEnvironmentVariableW(const uint16_t*n,uint16_t*v,uint32_t sz){
-    char nm[256]; int i=0; for(; n && n[i] && i<255; i++) nm[i]=(char)(n[i]<128?n[i]:'?'); nm[i]=0;
+    char nm[256]; w2u8(n,nm,sizeof nm);
     const char *val=(getenv)(nm); /* guest lookup: bypass the PELOAD_ cache */ if(getenv("PELOAD_TRACE_ENV")){ws("  [GetEnv] ");ws(nm);ws("=");ws(val?val:"(unset)");ws("\n");} if(!val){ g_lasterr=203; return 0; } g_lasterr=0; // ERROR_ENVVAR_NOT_FOUND so Rust env::var -> None, not Some("")
-    uint32_t len=(uint32_t)strlen(val);
-    if(!v||sz==0) return len+1;                 // required size incl NUL
-    uint32_t j=0; for(; val[j] && j<sz-1; j++) v[j]=(uint8_t)val[j]; v[j]=0; return j;
+    uint32_t len=(uint32_t)u82w_n(val,(int)strlen(val),0,0);   // UTF-16 units (UTF-8 values, e.g. a profile folder named with accents)
+    if(!v||sz<=len) return len+1;               // required size incl NUL (also when the buffer is too small, as Windows)
+    u82w(val,v,(int)sz); return len;
 }
 static uint32_t MSABI i_GetFullPathNameW(const uint16_t*name,uint32_t len,uint16_t*buf,uint16_t**part){
     // Full length of the (already-absolute) input. Windows semantics: return the
@@ -8702,7 +8739,7 @@ static void fill_find(Find*f,struct dirent*de,void*fd){ if(getenv("PELOAD_TRACE_
     uint8_t*d=fd; memset(d,0,592); char full[1800]; struct stat st;
     snprintf(full,sizeof full,"%s/%s",f->dir,de->d_name);
     uint32_t attr=0x80; if(stat(full,&st)==0){ attr=S_ISDIR(st.st_mode)?0x10:0x80; *(uint32_t*)(d+28)=(uint32_t)(st.st_size>>32); *(uint32_t*)(d+32)=(uint32_t)st.st_size; }
-    *(uint32_t*)d=attr; uint16_t*nm=(uint16_t*)(d+44); int i=0; for(; de->d_name[i]&&i<259;i++) nm[i]=(uint8_t)de->d_name[i]; nm[i]=0;
+    *(uint32_t*)d=attr; u82w(de->d_name,(uint16_t*)(d+44),260);   // cFileName[260]
 }
 static void* MSABI i_FindFirstFileExW(const uint16_t*w,int lvl,void*fd,int op,void*filt,uint32_t fla){
     (void)lvl;(void)op;(void)filt;(void)fla;
