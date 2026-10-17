@@ -8052,7 +8052,7 @@ static int MSABI i_SetFileInformationByHandle(void*h,int cls,void*info,uint32_t 
 static int g_pipe_other[MAXFD];   // pipe fd -> (mate fd + 1); 0 = not an anon-pipe end
 static int nt_name_is_pipedev(const char*n){ // n is already in slash form; Rust uses the \??\PIPE\ alias
     return n && (!strcasecmp(n,"/Device/NamedPipe") || !strncasecmp(n,"/Device/NamedPipe/",18)
-                 || !strcasecmp(n,"/??/PIPE") || !strncasecmp(n,"/??/PIPE/",9)); }
+                 || !strcasecmp(n,"/?\?/PIPE") || !strncasecmp(n,"/?\?/PIPE/",9)); }
 static int MSABI i_NtCreateNamedPipeFile(void**ph,uint32_t acc,void*oa,void*iosb,uint32_t share,
         uint32_t disp,uint32_t opts,uint32_t ptype,uint32_t rmode,uint32_t cmode,uint32_t maxinst,
         uint32_t inq,uint32_t outq,void*timeout){
@@ -8089,7 +8089,7 @@ static int nt_open_common(void **ph,uint32_t acc,void *oa,void *iosb,uint32_t di
         if(getenv("PELOAD_TRACE_NET")) ws("  [AFD] opened \\Device\\Afd poller\n"); return 0; }
     char path[2200];
     if(root){ intptr_t rv=(intptr_t)root; int rfd=(int)(rv-0x1000); const char *base=(rv>=0x1000&&rfd<MAXFD&&g_fdpath[rfd])?g_fdpath[rfd]:"."; const char*nm=name; if(nm[0]=='/')nm++; snprintf(path,sizeof path,"%s/%s",base,nm); }
-    else { const char*s=name; if(!strncmp(s,"/??/",4)) s+=4; else if(!strncmp(s,"/DosDevices/",12)) s+=12;
+    else { const char*s=name; if(!strncmp(s,"/?\?/",4)) s+=4; else if(!strncmp(s,"/DosDevices/",12)) s+=12;
            uint16_t tmp[2048]; int i=0; for(; s[i]&&i<2047;i++) tmp[i]=(uint8_t)(s[i]=='/'?'\\':s[i]); tmp[i]=0; win2unix(tmp,path,sizeof path); }
     int flags = (acc & 0x40000000)? O_RDWR : O_RDONLY;
     switch(disp){ case 0: case 5: flags|=O_CREAT|O_TRUNC; break; case 2: flags|=O_CREAT|O_EXCL; break; case 3: flags|=O_CREAT; break; case 4: flags|=O_TRUNC; break; default: break; }
