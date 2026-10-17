@@ -234,7 +234,17 @@ static int glp_start(void){
     return 1; }
 
 // ---- present (render thread): copy the back buffer into a slot; (present thread): show the newest slot ----
+static volatile unsigned long g_glp_shown;   // frames the present thread drew
+// PELOAD_GL_HELPER_STATS=1: every 2 s (render thread, at a present) what the helper did
+static void glp_stats(void){ static int on=-1; if(on<0) on=getenv("PELOAD_GL_HELPER_STATS")?1:0; if(!on) return;
+    static double t0; static uint64_t c0,p0,f0; static double b0,i0,w0; static unsigned long s0; double now=mono_s(); if(!t0){ t0=now; return; } if(now-t0<2.0) return;
+    double dt=now-t0, busy=g_glp->busy_s-b0, idle=g_glp->idle_s-i0; char m[300];
+    int k=snprintf(m,sizeof m,"  [glhelper] %.0f s: %.0fk commands/s, helper busy %.0f%%, frames published %.0f/s, shown %.0f/s, publish waits for the GPU %.1f ms/frame, GL errors %llu\n",
+        dt,(g_glp->cmds-c0)/dt/1000,busy+idle>0?100*busy/(busy+idle):0,(g_glp->published-p0)/dt,(g_glp_shown-s0)/dt,
+        g_glp->fence_waits-f0?(g_glp->fence_wait_s-w0)*1000/(double)(g_glp->fence_waits-f0):0,(unsigned long long)g_glp->gl_errors); (void)!write(2,m,k);
+    t0=now; c0=g_glp->cmds; p0=g_glp->published; f0=g_glp->fence_waits; b0=g_glp->busy_s; i0=g_glp->idle_s; w0=g_glp->fence_wait_s; s0=g_glp_shown; }
 static void glp_pq_publish(unsigned fbo,int vw,int vh,uint64_t frame){
+    glp_stats();
     uint32_t*w=glp_cmd(GLOP_PQ_PUBLISH,5); w[0]=fbo; w[1]=(uint32_t)vw; w[2]=(uint32_t)vh; memcpy(w+3,&frame,8); glp_end(); glp_wake(); }
 static struct { uint32_t id; IOSurfaceRef surf; unsigned tex; } g_glp_view[GLP_SLOTS];
 static unsigned g_glp_prog, g_glp_vao; static int g_glp_sloc=-1, g_glp_szloc=-1;
@@ -266,4 +276,4 @@ static void glp_present_draw(int slot,int w,int h){
     if(g_glp_sloc>=0) G.ProgramUniform1i(g_glp_prog,g_glp_sloc,0);
     if(g_glp_szloc>=0){ float sz[4]={(float)w,(float)h,0,0}; G.ProgramUniform4fv(g_glp_prog,g_glp_szloc,1,sz); }
     G.BindVertexArray(g_glp_vao); G.DrawArrays(4,0,3); }
-static void glp_present_done(void){ __atomic_store_n(&g_glp->pq_reading,-1,__ATOMIC_RELEASE); }
+static void glp_present_done(void){ __atomic_store_n(&g_glp->pq_reading,-1,__ATOMIC_RELEASE); g_glp_shown++; }

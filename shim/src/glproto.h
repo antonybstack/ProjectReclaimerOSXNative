@@ -51,8 +51,8 @@ typedef struct {
     volatile uint32_t slot_surface[GLP_SLOTS], slot_w[GLP_SLOTS], slot_h[GLP_SLOTS]; volatile uint64_t slot_frame[GLP_SLOTS];
     volatile int32_t pq_latest, pq_reading; volatile uint64_t pq_seq; uint64_t pad4[6];
     // statistics (helper)
-    volatile uint64_t cmds, gl_errors; volatile double busy_s, idle_s;
-    uint64_t pad5[4];
+    volatile uint64_t cmds, gl_errors; volatile double busy_s, idle_s; volatile uint64_t published, fence_waits; volatile double fence_wait_s;
+    uint64_t pad5[1];
     uint32_t ring[GLP_RING_WORDS];
     uint8_t reply[GLP_REPLY_BYTES];
 } GlpShared;

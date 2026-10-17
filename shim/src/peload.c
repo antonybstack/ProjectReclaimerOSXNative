@@ -6611,15 +6611,16 @@ static void pq_shotwin(unsigned long frame){
                 bmp_write_rgba(p,w,h,cap); free(cap); } } }
 }
 static void hb_draw_overlay(void); // fwd (hitbox.c)
+static double g_pq_tacq, g_pq_tdraw;   // PELOAD_PRESENT_STATS: present thread time waiting for a frame / drawing it
 static int pq_present_wait(unsigned long*seen,int ms){
     if(g_glp_on){   // the frame was rendered by the native GL helper: show its IOSurface slot (glproxy.c)
-        int w=0,h=0, slot=glp_present_acquire(seen,ms,&w,&h); if(slot<0) return 0;
+        double ta=mono_s(); int w=0,h=0, slot=glp_present_acquire(seen,ms,&w,&h); double tb=mono_s(); g_pq_tacq+=tb-ta; if(slot<0) return 0;
         CGLContextObj pc=CGLGetCurrentContext(); if(pc) CGLLockContext(pc);
         gl_bindfbo_any(GLE_FBO,0); G.Disable(0x0B71); G.Disable(0x0BE2); G.Disable(0x0C11); G.Disable(0x8DB9);
         { int dw=g_win_pw>0?g_win_pw:g_d3dgl_W, dh=g_win_ph>0?g_win_ph:g_d3dgl_H; double ar=h>0?(double)w/h:16.0/9; int vw=dw, vh=(int)(dw/ar+0.5); if(vh>dh){ vh=dh; vw=(int)(dh*ar+0.5); }
           if(vw!=dw||vh!=dh){ G.Viewport(0,0,dw,dh); G.ClearColor(0,0,0,1); G.Clear(GLE_COLORBIT); }
           G.Viewport((dw-vw)/2,(dh-vh)/2,vw,vh); }
-        glp_present_draw(slot,w,h); hb_draw_overlay(); G.Flush(); if(pc) CGLUnlockContext(pc); glp_present_done(); pq_shotwin((unsigned long)g_glp->slot_frame[slot]); return 1; }
+        glp_present_draw(slot,w,h); hb_draw_overlay(); G.Flush(); if(pc) CGLUnlockContext(pc); glp_present_done(); g_pq_tdraw+=mono_s()-tb; pq_shotwin((unsigned long)g_glp->slot_frame[slot]); return 1; }
     if(!pq_on()) return 0;
     pthread_mutex_lock(&g_pq_mx);
     if(g_pq_seq==*seen){ struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts); ts.tv_nsec+=(long)ms*1000000L; ts.tv_sec+=ts.tv_nsec/1000000000L; ts.tv_nsec%=1000000000L;
@@ -7065,8 +7066,11 @@ static void* present_thread_fn(void*a){ (void)a; pthread_setname_np("shim-presen
         static unsigned long pq_seen; int pq_shown=0;
         { extern volatile int g_win_visible_x; if(use_d3dgl && (win_hidden() || (!g_win_visible_x && !getenv("PELOAD_PRESENT_HIDDEN")))){ usleep(20000); continue; } }
         if(use_d3dgl && pq_on()){
-            if(pq_present_wait(&pq_seen,50)){ pq_shown=1; if(cglflush&&g_present_glctx){ CGLLockContext((CGLContextObj)g_present_glctx); cglflush(g_present_glctx); CGLUnlockContext((CGLContextObj)g_present_glctx); } }
-            else if(!g_pq_seq){ d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx); }   // nothing queued yet
+            if(pq_present_wait(&pq_seen,50)){ pq_shown=1; double tf=mono_s(); if(cglflush&&g_present_glctx){ CGLLockContext((CGLContextObj)g_present_glctx); cglflush(g_present_glctx); CGLUnlockContext((CGLContextObj)g_present_glctx); }
+                // PELOAD_PRESENT_STATS=1: window frames shown per second and the time CGLFlushDrawable takes
+                { static int on=-1; if(on<0) on=getenv("PELOAD_PRESENT_STATS")?1:0; if(on){ static double t0,fl; static unsigned long n; double now=mono_s(); fl+=now-tf; n++; if(!t0) t0=now;
+                    if(now-t0>=2.0){ char m[200]; int k=snprintf(m,sizeof m,"  [present] %.0f window frames/s, flush %.2f ms each, waiting %.0f ms/s, drawing %.0f ms/s\n",n/(now-t0),n?fl*1000/n:0,g_pq_tacq*1000/(now-t0),g_pq_tdraw*1000/(now-t0)); (void)!write(2,m,k); t0=now; n=0; fl=0; g_pq_tacq=g_pq_tdraw=0; } } } }
+            else if(!g_pq_seq && !g_glp_on){ d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx); }   // nothing queued yet (in process only: the helper's textures aren't in this context)
         } else if(use_d3dgl){
             d3dgl_blit_present(); if(cglflush&&g_present_glctx) cglflush(g_present_glctx);
         } else gdi_present_main();
@@ -7089,7 +7093,7 @@ static void* present_thread_fn(void*a){ (void)a; pthread_setname_np("shim-presen
         // (e.g. a halo3 GPU-frame-ready flag at 0x1821b0a74 + 24*i) each present cycle.
         const char* pk32=getenv("PELOAD_POKE32");
         if(pk32){ char buf[256]; snprintf(buf,sizeof buf,"%s",pk32); for(char*tok=strtok(buf,",");tok;tok=strtok(0,",")){ char*c=strchr(tok,':'); if(!c)continue; *c=0; uint64_t a=strtoull(tok,0,16); uint32_t v=(uint32_t)strtoull(c+1,0,16); if(a>0x100000000ULL) *(volatile uint32_t*)a=v; } }
-        if(!(use_d3dgl && pq_on() && g_pq_seq)){ struct timespec ts={0,33*1000000L}; nanosleep(&ts,0); }   // frame-driven once the queue runs
+        if(!(use_d3dgl && pq_on() && (g_pq_seq || g_glp_on))){ struct timespec ts={0,33*1000000L}; nanosleep(&ts,0); }   // frame-driven once the queue runs (the helper's queue: always)
         (void)pq_shown; } return 0; }
 static void* cocoa_make_gl_window_i(int w,int h){ CGLContextObj c=cocoa_make_gl_window(w,h);
     if(c){ g_present_glctx=(void*)c; void(*set)(void*)=dlsym(RTLD_DEFAULT,"CGLSetCurrentContext");

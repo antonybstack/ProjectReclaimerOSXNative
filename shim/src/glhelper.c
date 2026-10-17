@@ -100,12 +100,12 @@ static void present_poll(int wait){
     if(r==GL_TIMEOUT_EXPIRED) return;
     glDeleteSync(s->fence); s->fence=0; int i=g_slot_pending; g_slot_pending=-1;
     S->slot_surface[i]=IOSurfaceGetID(s->surf); S->slot_w[i]=(uint32_t)s->w; S->slot_h[i]=(uint32_t)s->h; S->slot_frame[i]=s->frame;
-    g_prev_latest=__atomic_load_n(&S->pq_latest,__ATOMIC_ACQUIRE); __atomic_store_n(&S->pq_latest,i,__ATOMIC_RELEASE); __atomic_add_fetch(&S->pq_seq,1,__ATOMIC_ACQ_REL);
+    g_prev_latest=__atomic_load_n(&S->pq_latest,__ATOMIC_ACQUIRE); __atomic_store_n(&S->pq_latest,i,__ATOMIC_RELEASE); __atomic_add_fetch(&S->pq_seq,1,__ATOMIC_ACQ_REL); S->published++;
     char b=1; (void)!write(g_present_fd,&b,1); }
 static void hx_pq_publish(const uint32_t*p){
     GLuint fbo=glh_name(NS_FBO,p[0]); int vw=(int)p[1], vh=(int)p[2]; uint64_t frame=glh_u64(p+3);
     if(vw<1||vh<1) return;
-    if(g_slot_pending>=0) present_poll(1);   // one frame in flight at a time (as the loader's present queue)
+    if(g_slot_pending>=0){ double t0=mono(); present_poll(1); S->fence_waits++; S->fence_wait_s+=mono()-t0; }   // one frame in flight at a time (as the loader's present queue)
     int latest=__atomic_load_n(&S->pq_latest,__ATOMIC_ACQUIRE), reading=__atomic_load_n(&S->pq_reading,__ATOMIC_ACQUIRE), i;
     for(i=0;i<GLP_SLOTS;i++) if(i!=latest && i!=reading && i!=g_prev_latest) break;
     if(i>=GLP_SLOTS) return;
