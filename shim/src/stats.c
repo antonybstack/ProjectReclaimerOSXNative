@@ -591,10 +591,22 @@ static const char g_st_optmap[]={
 #embed "../docs/option-map.json"
 ,0};
 #pragma clang diagnostic pop
+// DNS rebinding guard: a web page can point its own host name at 127.0.0.1 and then read this server (and POST
+// /control) as same-origin. Only a Host header naming localhost or an IP literal is served (a rebinding page always
+// sends its host name; LAN use by IP, e.g. PELOAD_TELEPORT_HOST, still works). No Host header (non-browser) = ok.
+static int st_host_ok(const char*req){
+    const char*h=strcasestr(req,"\r\nHost:"); if(!h) return 1; h+=7; while(*h==' '||*h=='\t') h++;
+    char v[128]; int n=0; while(h[n] && h[n]!='\r' && h[n]!='\n' && n<127){ v[n]=h[n]; n++; } v[n]=0;
+    if(v[0]=='['){ char*e=strchr(v,']'); return e!=0; }                        // [IPv6]:port
+    char*c=strrchr(v,':'); if(c) *c=0;
+    if(!strcasecmp(v,"localhost")) return 1;
+    struct in_addr a; return inet_pton(AF_INET,v,&a)==1; }
 static int st_send(int fd,const char*b,size_t n){ while(n){ ssize_t k=send(fd,b,n,0); if(k<=0){ if(k<0&&errno==EINTR) continue; return 0; } b+=k; n-=(size_t)k; } return 1; }
 static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-stats-http");
     int one=1; setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof one); setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&one,sizeof one);
+    struct timeval tv={5,0}; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof tv);   // a silent client can't hold a thread forever
     char req[2048]; ssize_t n=recv(fd,req,sizeof req-1,0); if(n<=0){ close(fd); return 0; } req[n]=0;
+    if(!st_host_ok(req)){ const char*fb="HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,fb,strlen(fb)); close(fd); return 0; }
     char meth[8]="", path[256]="/", qs[128]=""; sscanf(req,"%7s %255s",meth,path); char*q=strchr(path,'?'); if(q){ snprintf(qs,sizeof qs,"%s",q+1); *q=0; }
     char h[512];
     if(!strcmp(path,"/control")){
@@ -619,7 +631,7 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
         else { const char*nf="HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,nf,strlen(nf)); } }
     else if(strcmp(meth,"GET")){ const char*na="HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; st_send(fd,na,strlen(na)); }
     else if(!strcmp(path,"/events")){
-        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n");
+        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n");
         if(st_send(fd,h,(size_t)k)) for(unsigned long seen=0;;){ pthread_mutex_lock(&g_st_mx); while(g_st_seq==seen) pthread_cond_wait(&g_st_cv,&g_st_mx);
                 seen=g_st_seq; size_t len=g_st_len; char*j=malloc(len+16); if(j){ memcpy(j,"data: ",6); memcpy(j+6,g_st_json,len); memcpy(j+6+len,"\n\n",2); } pthread_mutex_unlock(&g_st_mx);
                 int ok=j && st_send(fd,j,len+8); free(j); if(!ok) break; } }
@@ -629,11 +641,11 @@ static void* st_conn(void*a){ int fd=(int)(intptr_t)a; pthread_setname_np("shim-
         if(st_send(fd,h,(size_t)k) && b.n) st_send(fd,b.b,b.n); free(b.b); }
     else if(!strcmp(path,"/heat.json")){
         StBuf b={0}; hm_json(&b);
-        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",b.n);
+        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",b.n);
         if(st_send(fd,h,(size_t)k) && b.n) st_send(fd,b.b,b.n); free(b.b); }
     else if(!strcmp(path,"/stats.json")){
         pthread_mutex_lock(&g_st_mx); size_t len=g_st_len; char*j=malloc(len+1); if(j && g_st_json) memcpy(j,g_st_json,len); else len=0; pthread_mutex_unlock(&g_st_mx);
-        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",len);
+        int k=snprintf(h,sizeof h,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",len);
         if(st_send(fd,h,(size_t)k) && len) st_send(fd,j,len); free(j); }
     else if(!strcmp(path,"/")){
         // PELOAD_STATS_PAGE=<file>: serve the page from disk on every request (play.sh sets it in a source checkout, so
