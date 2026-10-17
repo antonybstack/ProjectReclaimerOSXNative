@@ -7624,7 +7624,7 @@ static int   MSABI i_SetConsoleCtrlHandler(void*h,int add){ (void)h;(void)add; r
 // field lets WaitForSingleObject tell them from fd/process pseudo-handles.
 #define SYNC_MAGIC 0x53796E63u   // 'Sync'
 enum { K_EVENT, K_MUTEX, K_SEMA, K_THREAD };
-typedef struct { uint32_t magic; int kind; pthread_mutex_t m; pthread_cond_t c; int signaled, manual; long count, maxc; pthread_t owner; uint32_t tid, exitcode;
+typedef struct { uint32_t magic; int kind; pthread_mutex_t m; pthread_cond_t c; int signaled, manual; long count, maxc, rec; pthread_t owner; uint32_t tid, exitcode;
     int is_timer, timer_armed; uint64_t timer_due_us; long timer_period_ms; } SyncObj;
 static SyncObj* sync_new(int kind){ SyncObj*s=calloc(1,sizeof *s); s->magic=SYNC_MAGIC; s->kind=kind;
     pthread_mutex_init(&s->m,0); pthread_cond_init(&s->c,0); return s; }
@@ -7638,9 +7638,12 @@ static int   MSABI i_ResetEvent(void*h){ SyncObj*s=h; if(!is_sync((intptr_t)h))r
 static void* MSABI i_CreateSemaphoreW(void*sec,long init,long max,const uint16_t*nm){ (void)sec;(void)nm; SyncObj*s=sync_new(K_SEMA); s->count=init; s->maxc=max; return s; }
 static void* MSABI i_CreateSemaphoreA(void*sec,long init,long max,const char*nm){ return i_CreateSemaphoreW(sec,init,max,0); }
 static int   MSABI i_ReleaseSemaphore(void*h,long c,long*prev){ SyncObj*s=h; if(!is_sync((intptr_t)h))return 1; pthread_mutex_lock(&s->m); if(prev)*prev=s->count; s->count+=c; pthread_cond_broadcast(&s->c); pthread_mutex_unlock(&s->m); return 1; }
-static void* MSABI i_CreateMutexW(void*sec,int owned,const uint16_t*nm){ (void)sec;(void)nm; SyncObj*s=sync_new(K_MUTEX); s->count=owned?0:1; if(owned)s->owner=pthread_self(); return s; }
+static void* MSABI i_CreateMutexW(void*sec,int owned,const uint16_t*nm){ (void)sec;(void)nm; SyncObj*s=sync_new(K_MUTEX); s->count=owned?0:1; if(owned){ s->owner=pthread_self(); s->rec=1; } return s; }
 static void* MSABI i_CreateMutexA(void*sec,int owned,const char*nm){ return i_CreateMutexW(sec,owned,0); }
-static int   MSABI i_ReleaseMutex(void*h){ SyncObj*s=h; if(!is_sync((intptr_t)h))return 1; pthread_mutex_lock(&s->m); s->count=1; pthread_cond_signal(&s->c); pthread_mutex_unlock(&s->m); return 1; }
+// Win32 mutexes are recursive and owned: only the owner releases, once per acquisition (ERROR_NOT_OWNER otherwise)
+static int   MSABI i_ReleaseMutex(void*h){ SyncObj*s=h; if(!is_sync((intptr_t)h))return 1; int ok=0; pthread_mutex_lock(&s->m);
+    if(s->count==0 && pthread_equal(s->owner,pthread_self())){ ok=1; if(--s->rec<=0){ s->rec=0; s->count=1; pthread_cond_signal(&s->c); } }
+    pthread_mutex_unlock(&s->m); if(!ok) g_lasterr=288; return ok; }
 // wait one object with a deadline; returns 0 signaled, 0x102 timeout.
 // Waitable timers fire by wall clock (SetWaitableTimer arms timer_due_us).
 static uint32_t sync_wait(SyncObj*s,uint32_t ms){
@@ -7650,8 +7653,9 @@ static uint32_t sync_wait(SyncObj*s,uint32_t ms){
     for(;;){
         struct timeval now; gettimeofday(&now,0); uint64_t nus=(uint64_t)now.tv_sec*1000000+now.tv_usec;
         if(s->is_timer && s->timer_armed && nus>=s->timer_due_us){ s->signaled=1; if(s->timer_period_ms>0) s->timer_due_us+=(uint64_t)s->timer_period_ms*1000; else s->timer_armed=0; }
+        if(s->kind==K_MUTEX && s->count==0 && pthread_equal(s->owner,pthread_self())){ s->rec++; rc=0; break; }   // the owner re-enters
         int avail = (s->kind==K_SEMA)? (s->count>0) : (s->kind==K_MUTEX)? (s->count>0) : s->signaled;
-        if(avail){ if(s->kind==K_SEMA) s->count--; else if(s->kind==K_MUTEX){ s->count=0; s->owner=pthread_self(); } else if(!s->manual) s->signaled=0; rc=0; break; }
+        if(avail){ if(s->kind==K_SEMA) s->count--; else if(s->kind==K_MUTEX){ s->count=0; s->owner=pthread_self(); s->rec=1; } else if(!s->manual) s->signaled=0; rc=0; break; }
         if(ms==0 || nus>=caller_us){ rc=0x102; break; }
         uint64_t dl=caller_us; if(s->is_timer && s->timer_armed && s->timer_due_us<dl) dl=s->timer_due_us;
         if(dl==(uint64_t)-1){ pthread_cond_wait(&s->c,&s->m); }
@@ -7661,13 +7665,24 @@ static uint32_t sync_wait(SyncObj*s,uint32_t ms){
 static uint32_t MSABI i_WaitForSingleObject(void*h,uint32_t ms){ intptr_t hv=(intptr_t)h;
     if(is_sync(hv)) return sync_wait((SyncObj*)h,ms);
     if(hv>=0x8000 && hv<0x100000){ pid_t pid=(pid_t)(hv-0x8000);
-        if(ms==0) return child_reap(pid,0,0)? 0 : 0x102;  // signaled : timeout
-        child_reap(pid,0,1); return 0; }
+        if(ms==0xFFFFFFFF){ child_reap(pid,0,1); return 0; }
+        // finite timeout: poll (a timed wait used to block until the process exited)
+        for(double t0=mono_s();;){ if(child_reap(pid,0,0)) return 0; if((mono_s()-t0)*1000>=ms) return 0x102; struct timespec ts={0,2000000}; nanosleep(&ts,0); } }
     return 0; } // unknown handle: treat as already-signaled
+static int wait_ready_now(intptr_t hv){   // one poll of a handle for WaitForMultipleObjects (takes it if signaled)
+    if(is_sync(hv)) return sync_wait((SyncObj*)hv,0)==0;
+    if(hv>=0x8000 && hv<0x100000) return child_reap((pid_t)(hv-0x8000),0,0)!=0;   // a process: signaled once it exited
+    return 1; }   // unknown handle: already signaled (as WaitForSingleObject)
 static uint32_t MSABI i_WaitForMultipleObjects(uint32_t n,void*const*h,int all,uint32_t ms){
-    if(all){ for(uint32_t i=0;i<n;i++){ intptr_t hv=(intptr_t)h[i]; if(is_sync(hv)) sync_wait((SyncObj*)h[i],0xFFFFFFFF); } return 0; }
-    for(uint32_t spin=0;;spin++){ for(uint32_t i=0;i<n;i++){ intptr_t hv=(intptr_t)h[i]; if(is_sync(hv)){ if(sync_wait((SyncObj*)h[i],0)==0) return i; } else return i; }
-        if(ms==0) return 0x102; struct timespec ts={0,2000000}; nanosleep(&ts,0); if(ms!=0xFFFFFFFF && spin*2>=ms) return 0x102; } }
+    double t0=mono_s();
+    if(all){   // each in turn within the one deadline (not atomic as on Windows: earlier handles may be taken on a timeout)
+        for(uint32_t i=0;i<n;i++){ uint32_t left=0xFFFFFFFF;
+            if(ms!=0xFFFFFFFF){ double el=(mono_s()-t0)*1000; left=el>=ms?0:(uint32_t)(ms-el); }
+            if(i_WaitForSingleObject(h[i],left)==0x102) return 0x102; }
+        return 0; }
+    for(;;){ for(uint32_t i=0;i<n;i++) if(wait_ready_now((intptr_t)h[i])) return i;
+        if(ms==0 || (ms!=0xFFFFFFFF && (mono_s()-t0)*1000>=ms)) return 0x102;
+        struct timespec ts={0,2000000}; nanosleep(&ts,0); } }
 // The *Ex (alertable) variants MUST actually wait — stubbing them returns
 // "signaled" instantly, so a thread waiting on an event/thread proceeds before
 // the awaited work finishes = data race. We ignore the alertable flag (no APCs).
