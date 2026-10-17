@@ -232,6 +232,12 @@ build (re-tools/hsfuncs.py prints a script function's table entry -> its evaluat
 Test helpers: `PELOAD_INPUT_FACE=1` steers scripted pad segments with a zero right stick at the nearest other biped
 (`PELOAD_INPUT_FACE_POINT=x,y,z` at a fixed point).
 NEVER find engine structures by sweeping process memory -- it kernel-panicked the Mac (memory [[no-memory-sweeps]]).
+Bot benchmark (2026-10-17, shim/docs/bench.md): `BENCH_MAP=valhalla bash shim/tools/bench.sh 60 3 ["<env>"]` hosts a local
+match from the menu, spawns 60 bipeds (object_placement_data_new halo3+0x341508 + object_new 0x341ae8 + unit_add_equipment
+0x357ca8, bench.c, at main_loop_body under the game-state lock) in front of a fixed open-view camera, and prints fps + draws
++ CPU ms/frame (draw thread / process / GL helper); JSON in /tmp/reclaimer_bench.jsonl. Same scene every run (draws +-2):
+compare CPU ms/frame first, fps moves with other load on the Mac. M1 Max: 41.3 fps @ 5,084 draws, helper 100% busy
+(24.6 ms/frame) = the limit; in process 14.9 fps.
 Test runs: `bash shim/tools/quiet-run.sh "<env>" <secs>` (one instance, visible but input-less; QR_MINIMIZE=1
 minimizes, QR_HIDE=1 = no window for log-only runs). The old "minimized client stalls loading" was the thread-id
 mutex bug (55811fa), not minimizing. Process matches must be anchored (`pgrep -f '^[^ ]*build/peload'`):

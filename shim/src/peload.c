@@ -425,7 +425,7 @@ static void   MSABI i_GetSystemTimeAsFileTime(uint64_t *ft){
     // 100ns ticks since 1601-01-01; 11644473600s between 1601 and 1970
     if(ft) *ft = ((uint64_t)tv.tv_sec + 11644473600ULL)*10000000ULL + (uint64_t)tv.tv_usec*10;
 }
-extern volatile int g_hb_job_pending; static void hb_engine_jobs(void); static void hb_teleport_tick(void);   // hitbox.c: engine-thread jobs (teleport, run from the frame-timing hook)
+extern volatile int g_hb_job_pending; static void hb_engine_jobs(void); static void hb_teleport_tick(void); static void bench_tick(void); static void bench_engine_job(void); static volatile int g_bench_pending;   // hitbox.c: engine-thread jobs (teleport, run from the frame-timing hook)
 static int    MSABI i_QueryPerformanceCounter(uint64_t *c){ if(c) *c=mach_absolute_time(); return 1; }
 static int    MSABI i_QueryPerformanceFrequency(uint64_t *f){ if(f) *f=1000000000ULL; return 1; }
 // Must be unique per thread: msvcp140's std::mutex (_Mtx_lock) records the owner's GetCurrentThreadId() and SKIPS
@@ -1905,7 +1905,7 @@ static void fps_title_tick(void); // fwd: engine fps + draws/frame in the window
 static int win_hidden(void);
 static void present_cap(void){ static double per=-1, next; if(per<0){ const char*e=getenv("PELOAD_MAX_FPS"); double f=e?atof(e):(win_hidden()?30:0); per=f>0?1.0/f:0; }
     if(!per) return; double now=mono_s(); if(next>now){ usleep((useconds_t)((next-now)*1e6)); next+=per; } else next=now+per; }
-static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(void)fl; d3dtrace(4,"Present"); { extern void hb_spar_tick(void); hb_spar_tick(); } flog("t%x PRESENT swapchain=%p",pthread_mach_thread_np(pthread_self()),t); g_ct_frame++; if(!sub_on()) g_hb_taken=0; hb_teleport_tick(); flog_present(); fps_title_tick();
+static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(void)fl; d3dtrace(4,"Present"); { extern void hb_spar_tick(void); hb_spar_tick(); } flog("t%x PRESENT swapchain=%p",pthread_mach_thread_np(pthread_self()),t); g_ct_frame++; if(!sub_on()) g_hb_taken=0; hb_teleport_tick(); bench_tick(); flog_present(); fps_title_tick();
     // PELOAD_TRACE_PRESENT_RATE: periodic count+timestamp so we can see if/when the engine stops
     // calling Present (render-thread stall) vs keeps calling it (present-bridge stall).
     if(getenv("PELOAD_TRACE_PRESENT_RATE")){ static unsigned long pc; static long t0; struct timeval tv; gettimeofday(&tv,0);
@@ -3975,6 +3975,7 @@ static long     g_d3dgl_frame_draws, g_d3dgl_max_draws;
 // client's message pump runs it). PELOAD_NO_FPS_TITLE disables; the line is also logged with PELOAD_FPS_LOG.
 #include <dispatch/dispatch.h>
 static unsigned long g_draws_total;
+static pthread_t g_draw_pthread;   // the thread that executed the last draw (bench.c: its CPU time per frame)
 static char g_fps_title[160];
 // Launch time = start of the process that launched this one when that was a peload process started within
 // the last 2 minutes (the window lives in the spawned worker), else this process.
@@ -6443,7 +6444,7 @@ static void d3dgl_draw_impl(uint32_t vcount,int indexed,uint32_t instcount,uint3
                     bmp_write_rgba(p,W,H,cbuf);
                     char m[220]; int k=snprintf(m,sizeof m,"  [covprobe] NEWHIGH DUMP -> %s (vp=%dx%d fbo=%u red=%d nonblack=%d glerr=%u)\n",p,W,H,crt?crt->glfbo:0,red,nb,ge); (void)!write(2,m,k); } } } }
     PH(6);   // (attribute arrays stay enabled for the next draw; stale ones are disabled before each draw)
-    g_d3dgl_phase="done"; g_d3dgl_frame_draws++; g_draws_total++; d3dgl_note_rt(rt); rtc_note(rt,rt->w,rt->h,rt->fmt,nattr>0,g_d3dst.psrv[0]);
+    g_d3dgl_phase="done"; g_d3dgl_frame_draws++; g_draws_total++; g_draw_pthread=pthread_self(); d3dgl_note_rt(rt); rtc_note(rt,rt->w,rt->h,rt->fmt,nattr>0,g_d3dst.psrv[0]);
     { D3DObj*t0=g_d3dst.psrv[0]; { D3DObj*b=g_d3dst.blend; const uint32_t*r0=(b&&b->stkind==1)?b->sd+2:0;
       flog("draw rt=%06lx %ux%u f%u vp=%dx%d ps=[%.40s] t0=%06lx %ux%u f%u t1=%06lx blend=%u:%u/%u wm=%x",((unsigned long)rt>>4)&0xffffff,rt->w,rt->h,rt->fmt,vw,vh,ps?ps->rname:"-",
         ((unsigned long)t0>>4)&0xffffff,t0?t0->w:0,t0?t0->h:0,t0?t0->fmt:0,((unsigned long)g_d3dst.psrv[1]>>4)&0xffffff,r0?r0[0]:0,r0?r0[1]:0,r0?r0[2]:0,r0?(r0[7]&0xF):0xF); } }
@@ -7983,6 +7984,7 @@ static uintptr_t MSABI i_beginthread(WinThreadProc start,unsigned stack,void*arg
 #include "xaudio.c"
 #include "wasapi.c"
 #include "hitbox.c"
+#include "bench.c"
 #include "stats.c"
 static void MSABI i_endthread(void){ pthread_exit(0); }
 static uint32_t MSABI i_GetThreadId(void*h){ if(is_sync((intptr_t)h)) return ((SyncObj*)h)->tid; if(h==(void*)-2) return i_GetCurrentThreadId(); return (uint32_t)(uintptr_t)h; }
@@ -10185,7 +10187,8 @@ void __attribute__((ms_abi)) hb_on_delete(uint32_t handle);
 // ticks -- the safe point for engine jobs (teleport, stats page voice mutes).
 static void __attribute__((ms_abi)) hb_frame_hook(void){
     if(__builtin_expect(g_st_voice_pending,0)) st_voice_jobs();   // stats page voice mutes (stats.c)
-    if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs(); }
+    if(__builtin_expect(g_hb_job_pending,0)) hb_engine_jobs();
+    if(__builtin_expect(g_bench_pending,0)) bench_engine_job(); }   // PELOAD_BENCH_BOTS (bench.c)
 static void hbdel_install(uint8_t*base){
     // main_loop_body (halo3+0xb2250): the engine main thread, once per frame, before the frame's ticks -- where the
     // Reclaimer client itself runs teleports (shim/docs/teleport.md). (The old hook, halo3+0x9d22c, is a ms timer

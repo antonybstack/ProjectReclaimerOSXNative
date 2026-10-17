@@ -101,6 +101,7 @@ static void present_poll(int wait){
     glDeleteSync(s->fence); s->fence=0; int i=g_slot_pending; g_slot_pending=-1;
     S->slot_surface[i]=IOSurfaceGetID(s->surf); S->slot_w[i]=(uint32_t)s->w; S->slot_h[i]=(uint32_t)s->h; S->slot_frame[i]=s->frame;
     g_prev_latest=__atomic_load_n(&S->pq_latest,__ATOMIC_ACQUIRE); __atomic_store_n(&S->pq_latest,i,__ATOMIC_RELEASE); __atomic_add_fetch(&S->pq_seq,1,__ATOMIC_ACQ_REL); S->published++;
+    { struct timespec ct; clock_gettime(CLOCK_PROCESS_CPUTIME_ID,&ct); S->cpu_ns=(uint64_t)ct.tv_sec*1000000000ull+(uint64_t)ct.tv_nsec; }
     char b=1; (void)!write(g_present_fd,&b,1); }
 static void hx_pq_publish(const uint32_t*p){
     GLuint fbo=glh_name(NS_FBO,p[0]); int vw=(int)p[1], vh=(int)p[2]; uint64_t frame=glh_u64(p+3);
