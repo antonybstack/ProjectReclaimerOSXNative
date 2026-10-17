@@ -13,6 +13,7 @@
 #   PELOAD_H3="name=value,..." set Halo 3 engine settings (shim/docs/halo3-engine-globals.md)
 #   PELOAD_STATS_HTTP=<port>   live stats page port (default 8765: http://127.0.0.1:8765/); 0 turns it off
 #   PELOAD_D3DGL_SUBMIT=auto   GL submission thread: auto (default) = on in games with 40+ players, 1 = always, 0 = never
+#   PELOAD_GL_HELPER=1         experimental: the renderer's GL runs in the native helper (shim/build/peload-gl)
 #   RECLAIMER_DIRECT=1         skip the menu and go straight into a local Guardian match (~12 s). Reclaimer's
 #                              in-game UI (scoreboard names/scores, chat, game menu) only runs under its menu,
 #                              so in this mode the scoreboard shows bars without text.

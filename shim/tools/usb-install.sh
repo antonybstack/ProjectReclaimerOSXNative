@@ -35,7 +35,7 @@ echo "== MCC files -> $STEAM (takes a while)"
 mkdir -p "$STEAM"; $R --progress "$SRC/game/" "$STEAM/"
 
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
-chmod +x "$APP/shim/build/peload" "$APP"/shim/*.sh "$APP"/shim/tools/*.sh 2>/dev/null || true
+chmod +x "$APP"/shim/build/peload* "$APP"/shim/*.sh "$APP"/shim/tools/*.sh 2>/dev/null || true
 echo
 echo "Installed. Play with:"
 echo "   cd \"$APP\" && bash shim/play.sh"

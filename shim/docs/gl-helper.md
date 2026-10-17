@@ -78,6 +78,25 @@ does (kqueue `NOTE_EXIT`). If the helper fails to start, the loader logs it and 
   name allocation, present slots.
 - `shim/src/glhelper.c` — the helper process (arm64).
 
+## Switches
+
+- `PELOAD_GL_HELPER=1` — on (off by default). If `peload-gl` is missing or doesn't start, the loader renders in process.
+- `PELOAD_GL_HELPER_STATS=1` — every 2 s: commands/s, helper busy %, frames published / shown per second, GPU waits
+  at publish, GL errors.
+- `PELOAD_GL_HELPER_CHECK=1` — the helper calls `glGetError` after every command and logs errors with the function.
+- `PELOAD_GL_HELPER_SYNCERR=1` — `glGetError` in the loader becomes a real round trip (slow; debugging only).
+- `PELOAD_PRESENT_STATS=1` — window frames/s and the present thread's flush / wait / draw time (both renderers).
+
 ## Status
 
-- 2026-10-17: feasibility measured, IOSurface sharing tested, design written. Implementation started.
+- 2026-10-17: feasibility measured, IOSurface sharing tested, design written.
+- 2026-10-17: working, opt-in. Tested on an M1 Max at 2560x1440:
+  - direct Guardian match: 103-108 fps at 1,230-1,450 draws/frame (6.5-7.6 µs/draw), vs 74-84 fps at ~1,225 draws
+    in process (11.0 µs/draw); every frame reaches the window; helper 60-70% busy; no GL errors with CHECK on;
+  - Reclaimer's menu (its UI composited into the frame), Host Game -> match, Settings resolution change
+    (ResizeBuffers -> new back buffer and present slots), F8 capture (ReadPixels round trip), the GL submission
+    thread (`PELOAD_D3DGL_SUBMIT=1`): all work.
+- Known limits:
+  - F9 "visible only" reads its depth buffer back with `Map(READ)` every frame, a round trip under the helper.
+  - If the helper dies mid-game the loader exits (the GL state is gone).
+  - Not yet tested: online games, long sessions with many map changes, 60+ player games.
