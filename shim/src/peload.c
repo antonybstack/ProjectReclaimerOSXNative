@@ -830,12 +830,40 @@ static int MSABI com_fail(void){ return HR_E_NOTIMPL; }
 // 3D world (zero DrawIndexed, census geometry=0). Reporting a real adapter makes the engine take
 // the D3D hardware path so it submits world geometry we can then translate. Opt-in while bringing
 // up the D3D11->GL renderer.
-static int MSABI dxgiadapter_EnumOutputs(void*self,unsigned i,void**pp){ (void)self;(void)i; if(pp)*pp=0; return HR_DXGI_NOT_FOUND; }
+// IDXGIOutput: the one monitor (disp_size), so the client and engine can read the display's size and modes
+// (Reclaimer's Settings showed "Your display: 0 x 0" with no output). PELOAD_DXGI_NO_OUTPUT = none (old).
+static void disp_size(uint32_t*w,uint32_t*h,uint32_t*hz);
+static ComObj g_dxgioutput; static void* g_dxgioutput_vtbl[40];
+static int MSABI dxgiadapter_EnumOutputs(void*self,unsigned i,void**pp){ (void)self;
+    if(i==0 && !getenv("PELOAD_DXGI_NO_OUTPUT")){ if(pp)*pp=&g_dxgioutput; return HR_OK; }
+    if(pp)*pp=0; return HR_DXGI_NOT_FOUND; }
+// DXGI_OUTPUT_DESC: DeviceName WCHAR[32] @0, DesktopCoordinates RECT @64, AttachedToDesktop @80, Rotation @84, Monitor @88
+static int MSABI dxgiout_GetDesc(void*self,uint8_t*d){ (void)self; if(!d) return HR_INVALIDARG; memset(d,0,96); uint32_t w,h; disp_size(&w,&h,0);
+    const char*nm="\\\\.\\DISPLAY1"; for(int i=0;nm[i];i++) ((uint16_t*)d)[i]=(uint8_t)nm[i];
+    int32_t*r=(int32_t*)(d+64); r[2]=(int32_t)w; r[3]=(int32_t)h; *(int32_t*)(d+80)=1; *(uint32_t*)(d+84)=1/*IDENTITY*/; *(void**)(d+88)=(void*)0x4D01; return HR_OK; }
+// display modes: the display's own plus the usual 16:9 sizes below it, at its refresh rate
+static int dxgiout_modes(uint32_t (*m)[2]){ static const uint32_t std[][2]={{3840,2160},{2560,1440},{1920,1080},{1600,900},{1280,720}};
+    uint32_t w,h; disp_size(&w,&h,0); int n=0; m[n][0]=w; m[n][1]=h; n++;
+    for(unsigned i=0;i<sizeof std/sizeof std[0];i++) if(std[i][0]<=w && std[i][1]<=h && !(std[i][0]==w && std[i][1]==h)){ m[n][0]=std[i][0]; m[n][1]=std[i][1]; n++; }
+    return n; }
+// DXGI_MODE_DESC (28 bytes): Width, Height, RefreshRate{Num,Den}, Format, ScanlineOrdering, Scaling
+static void dxgiout_fill(uint8_t*d,uint32_t w,uint32_t h,uint32_t fmt){ uint32_t hz; disp_size(0,0,&hz); memset(d,0,28);
+    uint32_t*u=(uint32_t*)d; u[0]=w; u[1]=h; u[2]=hz; u[3]=1; u[4]=fmt?fmt:87; }
+static int MSABI dxgiout_GetDisplayModeList(void*self,uint32_t fmt,uint32_t fl,uint32_t*num,uint8_t*desc){ (void)self;(void)fl; if(!num) return HR_INVALIDARG;
+    uint32_t m[8][2]; int n=dxgiout_modes(m); if(!desc){ *num=(uint32_t)n; return HR_OK; }
+    uint32_t k=*num<(uint32_t)n?*num:(uint32_t)n; for(uint32_t i=0;i<k;i++) dxgiout_fill(desc+28*i,m[n-1-i][0],m[n-1-i][1],fmt);   // smallest first, as DXGI sorts
+    *num=k; return k<(uint32_t)n?(int)0x887A0007/*DXGI_ERROR_MORE_DATA*/:HR_OK; }
+static int MSABI dxgiout_FindClosestMatchingMode(void*self,const uint8_t*want,uint8_t*out,void*dev){ (void)self;(void)dev; if(!out) return HR_INVALIDARG;
+    uint32_t m[8][2]; int n=dxgiout_modes(m), best=0; uint32_t ww=want?((const uint32_t*)want)[0]:0, wh=want?((const uint32_t*)want)[1]:0;
+    if(ww&&wh) for(int i=1;i<n;i++){ long long a=llabs((long long)m[i][0]-ww)+llabs((long long)m[i][1]-wh), b=llabs((long long)m[best][0]-ww)+llabs((long long)m[best][1]-wh); if(a<b) best=i; }
+    dxgiout_fill(out,m[best][0],m[best][1],want?((const uint32_t*)want)[4]:0); return HR_OK; }
+static int MSABI dxgiout_WaitForVBlank(void*self){ (void)self; return HR_OK; }
 static int MSABI dxgiadapter_CheckInterfaceSupport(void*self,GUID_*g,void*umd){ (void)self;(void)g; if(umd)*(uint64_t*)umd=((uint64_t)11<<48)|((uint64_t)0<<32); return HR_OK; }
 static ComObj g_dxgiadapter; // real adapter object (vtbl populated in d3d_init); reused here (tentative def)
 static int MSABI dxgi_EnumAdapters(void*self,unsigned i,void**pp){ (void)self;
     if(getenv("PELOAD_DXGI_ADAPTER") && i==0){ if(pp)*pp=&g_dxgiadapter; return HR_OK; }
     if(pp)*pp=0; return HR_DXGI_NOT_FOUND; }
+static int MSABI dxgiout_GetParent(void*s,GUID_*r,void**pp){ (void)s;(void)r; if(pp)*pp=&g_dxgiadapter; return HR_OK; }
 // IDXGIFactory(1/2) vtable: IUnknown(0-2) + IDXGIObject(3-6) + IDXGIFactory(7+)
 static void* g_dxgifactory_vtbl[] = {
     (void*)com_QI,(void*)com_AddRef,(void*)com_Release,          // 0-2 IUnknown
@@ -1860,13 +1888,30 @@ static int MSABI swap_Present(void*t,uint32_t sync,uint32_t fl){ (void)sync;(voi
 // The back buffer must be STABLE across GetBuffer calls (the engine caches/compares it and
 // renders into it each frame); a fresh texture per call breaks present bookkeeping.
 static D3DObj* g_d3d_backbuf;
-// Swap-chain size: 1920x1080 (the engine's render size). It used to be a 4096x4096 placeholder, which
-// Reclaimer's own UI (the frontend menu and in-game overlays, composited into the back buffer with a
-// viewport of the back buffer's size) laid out for a 4096^2 screen. PELOAD_SWAP_SIZE=<w>x<h> overrides;
-// PELOAD_SWAP_SIZE=4096x4096 restores the old placeholder.
-static void swap_size(uint32_t*w,uint32_t*h){ static uint32_t W,H; if(!W){ W=1920; H=1080; const char*e=getenv("PELOAD_SWAP_SIZE");
-        if(e){ unsigned a=0,b=0; if(sscanf(e,"%ux%u",&a,&b)==2 && a>=320 && b>=200 && a<=4096 && b<=4096){ W=a; H=b; } } } *w=W; *h=H; }
+// Swap-chain size: what CreateSwapChain / ResizeBuffers ask for (Reclaimer's Display mode + Window size settings:
+// borderless = the display's size, windowed = the chosen size), 0x0 = the display (disp_size). It used to be a fixed
+// 1920x1080 with ResizeBuffers a no-op, so applying any other size failed the client's read-back check ("The renderer
+// did not apply the requested display mode and resolution"). PELOAD_SWAP_SIZE=<w>x<h> pins it (=1920x1080 = old).
+static void disp_size(uint32_t*w,uint32_t*h,uint32_t*hz);   // the monitor we report (defined with the window code)
+static uint32_t g_swap_w, g_swap_h;
+static int swap_pinned(uint32_t*w,uint32_t*h){ static int pin=-1; static uint32_t W,H; if(pin<0){ pin=0; const char*e=getenv("PELOAD_SWAP_SIZE");
+        unsigned a=0,b=0; if(e && sscanf(e,"%ux%u",&a,&b)==2 && a>=320 && b>=200 && a<=4096 && b<=4096){ W=a; H=b; pin=1; } }
+    if(pin){ *w=W; *h=H; } return pin; }
+static void swap_size(uint32_t*w,uint32_t*h){ if(!swap_pinned(w,h)){ if(!g_swap_w) disp_size(&g_swap_w,&g_swap_h,0); *w=g_swap_w; *h=g_swap_h; } }
 static D3DObj* swap_backbuf(void){ if(!g_d3d_backbuf){ uint32_t w,h; swap_size(&w,&h); g_d3d_backbuf=mktex(w,h,1,28,2); } return g_d3d_backbuf; }
+static void sub_drain(void);   // d3dsubmit.c
+// new back-buffer size (CreateSwapChain / ResizeBuffers). The old back buffer is dropped, not freed (no D3D object
+// is: views and the present path may still point at it); GetBuffer then makes one of the new size.
+static void swap_set_size(const char*why,uint32_t w,uint32_t h){
+    if(!w||!h){ uint32_t dw,dh; disp_size(&dw,&dh,0); if(!w) w=dw; if(!h) h=dh; }
+    if(w<320) w=320; if(h<200) h=200; if(w>4096) w=4096; if(h>4096) h=4096;
+    uint32_t ow,oh; swap_size(&ow,&oh); if(!swap_pinned(&ow,&oh)){ g_swap_w=w; g_swap_h=h; }
+    uint32_t nw,nh; swap_size(&nw,&nh);
+    if(getenv("PELOAD_TRACE_SWAP")){ char m[160]; int k=snprintf(m,sizeof m,"  [swap] %s %ux%u -> back buffer %ux%u (was %ux%u)\n",why,w,h,nw,nh,ow,oh); (void)!write(2,m,k); }
+    if(g_d3d_backbuf && (g_d3d_backbuf->w!=nw || g_d3d_backbuf->h!=nh)){ sub_drain(); g_d3d_backbuf=0; } }   // the GL thread is done with the old one
+// IDXGISwapChain::ResizeBuffers(count, w, h, format, flags) (slot 13); 0 = the window's size, here the display's
+static int MSABI swap_ResizeBuffers(void*t,uint32_t n,uint32_t w,uint32_t h,uint32_t fmt,uint32_t fl){ (void)t;(void)n;(void)fmt;(void)fl;
+    swap_set_size("ResizeBuffers",w,h); return HR_OK; }
 static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(void)buf;(void)r;
     swap_backbuf();
     if(pp)*pp=g_d3d_backbuf; return HR_OK; }
@@ -1875,7 +1920,9 @@ static int MSABI swap_GetBuffer(void*t,uint32_t buf,GUID_*r,void**pp){ (void)t;(
 // get a null device, take their error path, and LEAK a RefCell borrow -> the
 // frontend's "RefCell already borrowed" re-entrancy panic on the next UI draw.
 static int MSABI swap_GetDevice(void*t,GUID_*riid,void**pp){ (void)t;(void)riid; if(pp)*pp=&g_d3ddevice; return HR_OK; }
-static int MSABI dxgi_CreateSwapChain(void*t,void*dev,void*desc,void**pp){ (void)t;(void)dev;(void)desc; if(pp)*pp=d3dobj(g_dxgiswap_vtbl,0,0); return HR_OK; }
+static int MSABI dxgi_CreateSwapChain(void*t,void*dev,void*desc,void**pp){ (void)t;(void)dev;
+    if(desc) swap_set_size("CreateSwapChain",((uint32_t*)desc)[0],((uint32_t*)desc)[1]);   // BufferDesc.Width / Height
+    if(pp)*pp=d3dobj(g_dxgiswap_vtbl,0,0); return HR_OK; }
 // DXGI_SWAP_CHAIN_DESC: BufferDesc{W@0,H@4,RR num@8/den@12,Format@16,...} SampleDesc{Count@28,Q@32}
 // BufferUsage@36 BufferCount@40 OutputWindow@48 Windowed@56 SwapEffect@60 Flags@64. A zeroed
 // desc (our old no-op) made the engine see buffers=0/format=0 and never count a "ready present".
@@ -1957,6 +2004,10 @@ static void d3d_init(void){
     ga[0]=(void*)adapter_QI;ga[1]=(void*)d3d_AddRef;ga[2]=(void*)d3d_Release;ga[6]=(void*)dxgidev_GetParent;ga[8]=(void*)adapter_GetDesc;
     ga[7]=(void*)dxgiadapter_EnumOutputs; ga[9]=(void*)dxgiadapter_CheckInterfaceSupport; ga[10]=(void*)adapter_GetDesc; // GetDesc1
     g_dxgiadapter.vtbl=ga;
+    void** go=g_dxgioutput_vtbl; for(int i=0;i<40;i++) go[i]=(void*)com_fail;   // IDXGIOutput (+1..6: not implemented)
+    go[0]=(void*)com_QI; go[1]=(void*)com_AddRef; go[2]=(void*)com_Release; go[6]=(void*)dxgiout_GetParent;
+    go[7]=(void*)dxgiout_GetDesc; go[8]=(void*)dxgiout_GetDisplayModeList; go[9]=(void*)dxgiout_FindClosestMatchingMode; go[10]=(void*)dxgiout_WaitForVBlank;
+    g_dxgioutput.vtbl=go;
     void** x=g_d3dctx_vtbl; for(int i=0;i<160;i++) x[i]=(void*)ctx_ret0;
     x[0]=(void*)d3d_QI;x[1]=(void*)d3d_AddRef;x[2]=(void*)d3d_Release;x[3]=(void*)ctx_GetDevice;x[4]=(void*)d3d_GetPD;x[5]=(void*)d3d_SetPD;x[6]=(void*)d3d_SetPDI;
     x[12]=(void*)ctx_DrawIndexed; x[13]=(void*)ctx_Draw;                                             // DrawIndexed, Draw
@@ -2014,7 +2065,7 @@ static void d3d_init(void){
     s[0]=(void*)d3d_QI;s[1]=(void*)d3d_AddRef;s[2]=(void*)d3d_Release;
     s[7]=(void*)swap_GetDevice;                           // IDXGIDeviceSubObject::GetDevice
     s[8]=(void*)swap_Present;s[9]=(void*)swap_GetBuffer;
-    s[11]=(void*)swap_GetFullscreenState; s[12]=(void*)swap_GetDesc;
+    s[11]=(void*)swap_GetFullscreenState; s[12]=(void*)swap_GetDesc; s[13]=(void*)swap_ResizeBuffers;
     if(getenv("PELOAD_TRACE_SWAP")){ extern void* g_swaptrace[40]; for(int i=10;i<40;i++) if(s[i]==(void*)ctx_ret0) s[i]=g_swaptrace[i]; }
     g_dxgifactory_vtbl[10]=(void*)dxgi_CreateSwapChain;   // IDXGIFactory::CreateSwapChain
 }
@@ -3166,13 +3217,13 @@ static int64_t MSABI i_DispatchMessageW(const void*m){ if(!m) return 0; const ui
     if(w&&w->magic==WWIN_MAGIC&&w->wndproc){ if(getenv("PELOAD_TRACE_MSG")){ char b[64]; int k=snprintf(b,sizeof b,"  [msg] dispatch 0x%x -> wndproc\n",msg); ws(b);} return w->wndproc(w,msg,wp,lp); } return 0; }
 static int    MSABI i_TranslateMessage(const void*m){ (void)m; return 0; }
 static void*  MSABI i_DefRawHandle(void){ return (void*)0x4857; }
-// display/monitor: report a single 1920x1080 primary monitor
+// display/monitor: report a single primary monitor of the main display's size (disp_size)
 static void*  MSABI i_MonitorFromWindow(void*h,uint32_t f){ (void)h;(void)f; return (void*)0x4D01; }
 static void*  MSABI i_MonitorFromPoint(uint64_t pt,uint32_t f){ (void)pt;(void)f; return (void*)0x4D01; }
 static void*  MSABI i_MonitorFromRect(const void*r,uint32_t f){ (void)r;(void)f; return (void*)0x4D01; }
-static int    MSABI i_GetMonitorInfoW(void*h,uint8_t*mi){ (void)h; if(!mi) return 0; uint32_t cb=*(uint32_t*)mi;
-    int32_t *r=(int32_t*)(mi+4);  r[0]=0;r[1]=0;r[2]=1920;r[3]=1080;      // rcMonitor
-    int32_t *wk=(int32_t*)(mi+20); wk[0]=0;wk[1]=0;wk[2]=1920;wk[3]=1080; // rcWork
+static int    MSABI i_GetMonitorInfoW(void*h,uint8_t*mi){ (void)h; if(!mi) return 0; uint32_t cb=*(uint32_t*)mi, dw,dh; disp_size(&dw,&dh,0);
+    int32_t *r=(int32_t*)(mi+4);  r[0]=0;r[1]=0;r[2]=(int32_t)dw;r[3]=(int32_t)dh;      // rcMonitor
+    int32_t *wk=(int32_t*)(mi+20); wk[0]=0;wk[1]=0;wk[2]=(int32_t)dw;wk[3]=(int32_t)dh; // rcWork
     *(uint32_t*)(mi+36)=1;                                               // MONITORINFOF_PRIMARY
     if(cb>=104){ uint16_t*dev=(uint16_t*)(mi+40); const char*d="\\\\.\\DISPLAY1"; int i=0; for(;d[i];i++)dev[i]=(uint8_t)d[i]; dev[i]=0; }
     return 1; }
@@ -3183,11 +3234,11 @@ static int    MSABI i_GetMonitorInfoW(void*h,uint8_t*mi){ (void)h; if(!mi) retur
 #define WIN_W 1280
 #define WIN_H 720
 static int    MSABI i_GetSystemMetrics(int idx){ switch(idx){ case 0:return WIN_W; case 1:return WIN_H; case 4:return 0; default:return 0; } }
-// EnumDisplayMonitors: report the one (primary) 1920x1080 monitor that MonitorFromWindow/GetMonitorInfoW
+// EnumDisplayMonitors: report the one (primary) monitor that MonitorFromWindow/GetMonitorInfoW
 // describe. It used to return TRUE without calling the callback, so Reclaimer saw zero monitors and its egui
 // UI scale fell back to window_width/1 (pixels_per_point 1280 -> the frontend menu's widgets off-screen).
 static int    MSABI i_EnumDisplayMonitors(void*dc,const void*clip,void*cb,int64_t data){ (void)dc;(void)clip;
-    if(!cb) return 0; int32_t rc[4]={0,0,1920,1080};
+    if(!cb) return 0; uint32_t dw,dh; disp_size(&dw,&dh,0); int32_t rc[4]={0,0,(int32_t)dw,(int32_t)dh};
     int (__attribute__((ms_abi)) *fn)(void*,void*,int32_t*,int64_t)=cb;
     void*mon=(void*)0x4D01;   // the handle MonitorFromWindow/Point/Rect return
     fn(mon,dc,rc,data); return 1; }
@@ -3215,10 +3266,10 @@ static int    MSABI i_SetProcessDpiAwareness(int v){ (void)v; return 0; }
 static int    MSABI i_SetProcessDpiAwarenessContext(void*v){ (void)v; return 1; }
 static int    MSABI i_GetDeviceCaps(void*hdc,int index){ (void)hdc;
     switch(index){ case 88: case 90: return 96;      // LOGPIXELSX / LOGPIXELSY
-        case 8: case 118: return 1920;                   // HORZRES / DESKTOPHORZRES
-        case 10: case 117: return 1080;                  // VERTRES / DESKTOPVERTRES
+        case 8: case 118: { uint32_t v; disp_size(&v,0,0); return (int)v; }   // HORZRES / DESKTOPHORZRES
+        case 10: case 117: { uint32_t v; disp_size(0,&v,0); return (int)v; }  // VERTRES / DESKTOPVERTRES
         case 12: return 32; case 14: return 1;           // BITSPIXEL / PLANES
-        case 116: return 60;                             // VREFRESH
+        case 116: { uint32_t v; disp_size(0,0,&v); return (int)v; }           // VREFRESH
         case 4: return 508; case 6: return 286;          // HORZSIZE / VERTSIZE (mm, ~23" 16:9)
         case 24: return -1;                              // NUMCOLORS (true colour)
         case 2: return 1;                                // TECHNOLOGY: DT_RASDISPLAY
@@ -3242,6 +3293,19 @@ static int    MSABI i_SetCursorPos(int x,int y){ (void)x;(void)y; return 1; }
 static void*  MSABI i_SetCursor(void*c){ return c; }
 void* fg_hwnd_ext(void);
 #include <CoreGraphics/CoreGraphics.h>
+// The one monitor we report (GetMonitorInfo, EnumDisplayMonitors, EnumDisplaySettings, GetDeviceCaps; borderless
+// windows and 0x0 swap chains take its size): the Mac's main display in pixels, as Windows reports a monitor, fitted
+// into 4096x4096 (the GL path's texture limit). PELOAD_DISPLAY_SIZE=<w>x<h> overrides (=1920x1080 = the old fixed one).
+static void disp_size(uint32_t*w,uint32_t*h,uint32_t*hz){ static uint32_t W,H,HZ;
+    if(!W){ const char*e=getenv("PELOAD_DISPLAY_SIZE"); unsigned a=0,b=0; HZ=60;
+        CGDisplayModeRef m=CGDisplayCopyDisplayMode(CGMainDisplayID());
+        if(m){ double r=CGDisplayModeGetRefreshRate(m); if(r>=24 && r<=500) HZ=(uint32_t)(r+0.5); }
+        if(e && sscanf(e,"%ux%u",&a,&b)==2 && a>=640 && b>=480 && a<=4096 && b<=4096){ W=a; H=b; }
+        else if(m){ W=(uint32_t)CGDisplayModeGetPixelWidth(m); H=(uint32_t)CGDisplayModeGetPixelHeight(m);
+            if(W>4096||H>4096){ double s=W>H?4096.0/W:4096.0/H; W=(uint32_t)(W*s)&~1u; H=(uint32_t)(H*s)&~1u; } }
+        if(m) CGDisplayModeRelease(m);
+        if(W<640||H<480){ W=1920; H=1080; } }
+    if(w) *w=W; if(h) *h=H; if(hz) *hz=HZ; }
 #include "wininput.c"
 static int    MSABI i_SetLayeredWindowAttributes(void*h,uint32_t key,uint8_t a,uint32_t f){ (void)h;(void)key;(void)a;(void)f; return 1; }
 static int    MSABI i_UpdateLayeredWindow(void*h,void*dc,void*pd,void*ps,void*sd,void*sp,uint32_t key,void*bf,uint32_t f){ (void)h;(void)dc;(void)pd;(void)ps;(void)sd;(void)sp;(void)key;(void)bf;(void)f; return 1; }
@@ -6451,7 +6515,7 @@ static void d3dgl_blit_fullscreen_i(unsigned vao){
 // present thread wakes, waits on the fence on the GPU (glWaitSync, no CPU stall) and shows that frame.
 // PELOAD_D3DGL_NOPQ restores the old timer + glFinish path.
 unsigned long g_eng_present_no_x; static unsigned long g_eng_present_no;   // engine Present() count (frame tag for captures / diagnostics)
-static unsigned g_pq_tex[3], g_pq_fbo[3]; static void* g_pq_fence[3]; static int g_pq_latest=-1, g_pq_reading=-1, g_pq_w, g_pq_h; static unsigned long g_pq_frameno[3];
+static unsigned g_pq_tex[3], g_pq_fbo[3]; static void* g_pq_fence[3]; static int g_pq_latest=-1, g_pq_reading=-1, g_pq_w[3], g_pq_h[3]; static unsigned long g_pq_frameno[3];
 static unsigned long g_pq_seq; static pthread_mutex_t g_pq_mx=PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_pq_cv=PTHREAD_COND_INITIALIZER;
 static void*(*pq_fencesync)(unsigned,unsigned); static void(*pq_waitsync)(void*,unsigned,uint64_t); static void(*pq_delsync)(void*);
 static int pq_on(void){ static int on=-1; if(on<0){ on=getenv("PELOAD_D3DGL_NOPQ")?0:1; if(on){ pq_fencesync=dlsym(RTLD_DEFAULT,"glFenceSync"); pq_waitsync=dlsym(RTLD_DEFAULT,"glWaitSync"); pq_delsync=dlsym(RTLD_DEFAULT,"glDeleteSync"); if(!pq_fencesync||!pq_waitsync||!pq_delsync) on=0; } } return on; }
@@ -6459,18 +6523,21 @@ static int pq_on(void){ static int on=-1; if(on<0){ on=getenv("PELOAD_D3DGL_NOPQ
 static void pq_publish(void){
     if(!pq_on() || !g_d3dgl_present_tex || !G.BlitFramebuffer) return;
     D3DObj*bb=g_d3d_backbuf; if(!bb||!bb->glfbo||bb->gltex!=g_d3dgl_present_tex) return;   // only the swap-chain backbuffer path
-    int W=g_d3dgl_W, H=g_d3dgl_H; if(W<1||H<1) return;
+    int vw=g_d3dgl_present_vw>0?g_d3dgl_present_vw:g_d3dgl_present_tw, vh=g_d3dgl_present_vh>0?g_d3dgl_present_vh:g_d3dgl_present_th;
+    // the frame keeps the back buffer's resolution (the window blit scales it); it was squeezed into a
+    // g_d3dgl_W x g_d3dgl_H (1280x720) texture here, so every frame reached the screen at 720p
+    int W=vw>4096?4096:vw, H=vh>4096?4096:vh; if(W<1||H<1) return;
     int slot; pthread_mutex_lock(&g_pq_mx);
     for(slot=0;slot<3;slot++) if(slot!=g_pq_reading && slot!=g_pq_latest) break;
     void*old=(slot<3)?g_pq_fence[slot]:0; if(slot<3) g_pq_fence[slot]=0;
     pthread_mutex_unlock(&g_pq_mx); if(slot>=3) return;
     if(old) pq_delsync(old);
-    if(g_pq_w!=W||g_pq_h!=H||!g_pq_tex[0]){ for(int i=0;i<3;i++){ if(!g_pq_tex[i]){ G.GenTextures(1,&g_pq_tex[i]); G.GenFramebuffers(1,&g_pq_fbo[i]); }
-            TEXCACHE_INVALIDATE(); G.BindTexture(GLE_TEX2D,g_pq_tex[i]); G.TexImage2D(GLE_TEX2D,0,GLE_RGBA8,W,H,0,GLE_RGBA,GLE_UBYTE,0);
-            G.TexParameteri(GLE_TEX2D,0x2801,GLE_LINEAR); G.TexParameteri(GLE_TEX2D,0x2800,GLE_LINEAR); G.TexParameteri(GLE_TEX2D,0x2802,GLE_CLAMP); G.TexParameteri(GLE_TEX2D,0x2803,GLE_CLAMP); G.TexParameteri(GLE_TEX2D,0x813D,0);
-            gl_bindfbo_any(GLE_FBO,g_pq_fbo[i]); G.FramebufferTexture2D(GLE_FBO,GLE_CA0,GLE_TEX2D,g_pq_tex[i],0); }
-        g_pq_w=W; g_pq_h=H; }
-    int vw=g_d3dgl_present_vw>0?g_d3dgl_present_vw:g_d3dgl_present_tw, vh=g_d3dgl_present_vh>0?g_d3dgl_present_vh:g_d3dgl_present_th;
+    if(g_pq_w[slot]!=W||g_pq_h[slot]!=H||!g_pq_tex[slot]){   // (re)size only this slot: the present thread may be drawing another
+        if(!g_pq_tex[slot]){ G.GenTextures(1,&g_pq_tex[slot]); G.GenFramebuffers(1,&g_pq_fbo[slot]); }
+        TEXCACHE_INVALIDATE(); G.BindTexture(GLE_TEX2D,g_pq_tex[slot]); G.TexImage2D(GLE_TEX2D,0,GLE_RGBA8,W,H,0,GLE_RGBA,GLE_UBYTE,0);
+        G.TexParameteri(GLE_TEX2D,0x2801,GLE_LINEAR); G.TexParameteri(GLE_TEX2D,0x2800,GLE_LINEAR); G.TexParameteri(GLE_TEX2D,0x2802,GLE_CLAMP); G.TexParameteri(GLE_TEX2D,0x2803,GLE_CLAMP); G.TexParameteri(GLE_TEX2D,0x813D,0);
+        gl_bindfbo_any(GLE_FBO,g_pq_fbo[slot]); G.FramebufferTexture2D(GLE_FBO,GLE_CA0,GLE_TEX2D,g_pq_tex[slot],0);
+        g_pq_w[slot]=W; g_pq_h[slot]=H; }
     d3dgl_reset_raster_ops();
     gl_bindfbo_any(0x8CA8,bb->glfbo); gl_bindfbo_any(0x8CA9,g_pq_fbo[slot]);
     // raw bytes (FRAMEBUFFER_SRGB off), scaled to the window; D3D row 0 (GL row 0) lands at the window TOP
@@ -6497,7 +6564,7 @@ static int pq_present_wait(unsigned long*seen,int ms){
     CGLContextObj pc=CGLGetCurrentContext(); if(pc) CGLLockContext(pc);
     gl_bindfbo_any(GLE_FBO,0); G.Disable(0x0B71); G.Disable(0x0BE2); G.Disable(0x0C11); G.Disable(0x8DB9);
     { int dw=g_win_pw>0?g_win_pw:g_d3dgl_W, dh=g_win_ph>0?g_win_ph:g_d3dgl_H;   // letterbox the frame's aspect into the window
-      double ar=(double)g_d3dgl_W/g_d3dgl_H; int vw=dw, vh=(int)(dw/ar+0.5); if(vh>dh){ vh=dh; vw=(int)(dh*ar+0.5); }
+      double ar=g_pq_h[slot]>0?(double)g_pq_w[slot]/g_pq_h[slot]:(double)g_d3dgl_W/g_d3dgl_H; int vw=dw, vh=(int)(dw/ar+0.5); if(vh>dh){ vh=dh; vw=(int)(dh*ar+0.5); }
       if(vw!=dw||vh!=dh){ G.Viewport(0,0,dw,dh); G.ClearColor(0,0,0,1); G.Clear(GLE_COLORBIT); }
       G.Viewport((dw-vw)/2,(dh-vh)/2,vw,vh); }
     G.UseProgram(0); G.BindProgramPipeline(0); G.UseProgram(g_pq_prog);
@@ -8718,11 +8785,17 @@ static void* MSABI i_GetParent(void*h){ (void)h; return 0; }           // our wi
 static void* MSABI i_GetFocus(void){ return fg_hwnd(); }   // the one logical window
 static int MSABI i_RedrawWindow(void*h,const void*rc,void*rgn,uint32_t fl){ (void)h;(void)rc;(void)rgn;(void)fl; return 1; } // we present on our own thread
 static int MSABI i_EnumWindows(void*proc,int64_t lparam){ extern void* g_last_hwnd; if(!proc) return 0; int(__attribute__((ms_abi))*cb)(void*,int64_t)=proc; cb(g_last_hwnd?g_last_hwnd:(void*)0x4857,lparam); return 1; }
-static int MSABI i_EnumDisplaySettingsW(const uint16_t*dev,uint32_t mode,uint8_t*dm){ (void)dev;(void)mode; if(!dm) return 0;
-    // DEVMODEW: fill the display fields the caller reads. dmSize@68, dmFields@72,
-    // dmBitsPerPel@104, dmPelsWidth@108, dmPelsHeight@112, dmDisplayFrequency@120.
+static int MSABI i_EnumDisplaySettingsW(const uint16_t*dev,uint32_t mode,uint8_t*dm){ (void)dev; if(!dm) return 0;
+    // the monitor's one mode: ENUM_CURRENT_SETTINGS (-1), ENUM_REGISTRY_SETTINGS (-2) or index 0; later indexes end
+    // the list (every index used to succeed, so a mode enumeration never ended)
+    if(mode!=0xFFFFFFFFu && mode!=0xFFFFFFFEu && mode!=0){ g_lasterr=0; return 0; }
+    // DEVMODEW: fill the display fields the caller reads. dmSize@68, dmFields@72, dmBitsPerPel@168, dmPelsWidth@172,
+    // dmPelsHeight@176, dmDisplayFrequency@184 (dmDeviceName and dmFormName are WCHAR[32]). They were written at the
+    // DEVMODEA offsets (104/108/112/120), so callers read 0x0: Reclaimer's Settings showed "Your display: 0 x 0"
+    // and its Default rendering resolution never followed the display.
+    uint32_t dw,dh,hz; disp_size(&dw,&dh,&hz);
     *(uint16_t*)(dm+68)=220; *(uint32_t*)(dm+72)=0x40000|0x80000|0x100000|0x400000;
-    *(uint32_t*)(dm+104)=32; *(uint32_t*)(dm+108)=WIN_W; *(uint32_t*)(dm+112)=WIN_H; *(uint32_t*)(dm+120)=60; return 1; }
+    *(uint32_t*)(dm+168)=32; *(uint32_t*)(dm+172)=dw; *(uint32_t*)(dm+176)=dh; *(uint32_t*)(dm+184)=hz; return 1; }
 // MISC
 static int MSABI i_SetThreadPriority(void*h,int p){ (void)h;(void)p; return 1; }
 static int32_t MSABI i_SetThreadDescription(void*h,const uint16_t*desc){ (void)h; char nm[64]; int i=0; for(; desc&&desc[i]&&i<63;i++) nm[i]=(char)desc[i]; nm[i]=0; pthread_setname_np(nm); return 0; }

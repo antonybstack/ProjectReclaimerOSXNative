@@ -102,6 +102,14 @@ on pipes/sockets uses read() + async completion (pread -> ESPIPE made parents st
 stdout), GetOverlappedResult(wait) waits. PELOAD_WORKER_INHERIT_STDIO breaks parents that pipe child stdio
 (the dedicated supervisor saw EOF and restarted servers in a loop).
 
+Display / resolution (2026-10-17): the reported monitor (GetMonitorInfo, EnumDisplayMonitors, EnumDisplaySettingsW,
+GetDeviceCaps, one IDXGIOutput) = the Mac's main display in pixels (disp_size; `PELOAD_DISPLAY_SIZE=1920x1080` = old fixed
+monitor, `PELOAD_DXGI_NO_OUTPUT` = no output). The engine's swap chain takes CreateSwapChain's size and ResizeBuffers is real
+(it was a no-op on a fixed 1920x1080 back buffer -> "The renderer did not apply the requested display mode and resolution");
+Reclaimer's Rendering resolution IS the swap-chain size (Default = the display's size borderless, 1920x1080 windowed).
+EnumDisplaySettingsW wrote DEVMODEA offsets ("Your display: 0 x 0"). The present queue's frame textures used to be
+1280x720 (g_d3dgl_W/H), so every frame reached the window at 720p; they now keep the back buffer's size. `PELOAD_TRACE_SWAP`
+logs swap-chain sizes. GetClientRect/GetSystemMetrics still report the 1280x720 client space (input coordinates).
 Perf (2026-10-16, M4, 1280x720 window, 1920x1080 internal): gameplay median ~116 fps, p10 ~80,
 min ~50 (3-min soak). Draw-call bound: ~3.6 us per glDraw* in GL-on-Metal x ~1200-2300 draws/frame;
 the next big step would be a GL submission thread. CPU particle compute runs on a worker thread
