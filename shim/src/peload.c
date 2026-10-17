@@ -74,10 +74,13 @@ static char* peload_cgetenv(const char*name){
             k=exp; }
         if(k==name) return __atomic_load_n(&ready[s],__ATOMIC_ACQUIRE) ? vals[s] : getenv(name); }
     return getenv(name); }
-#define getenv(n) peload_cgetenv(n)
 // GENV1("PELOAD_X"): read a PELOAD_* switch once per call site and keep it in a static -- for the per-draw path, where
 // even the cached lookup above (hash + compare, ~20-40 ns translated) adds up over thousands of draws a frame
 #define GENV1(n) ({ static const char* _gv=(const char*)1; if(__builtin_expect(_gv==(const char*)1,0)) _gv=peload_cgetenv(n); _gv; })
+// getenv("PELOAD_...") with a string literal (decided at compile time) = GENV1: a static per call site. The cached
+// lookup still ran ~15 times per draw call and once per HeapAlloc (PELOAD_TRACE_ALLOC: 64M calls in a 55 s match).
+// Other names and non-literal arguments go through peload_cgetenv as before. (getenv)(name) = the real libc one.
+#define getenv(n) (__builtin_constant_p(n) && !__builtin_strncmp((n),"PELOAD_",7) ? (char*)GENV1(n) : peload_cgetenv(n))
 #include <sys/ioctl.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <libkern/OSCacheControl.h>
