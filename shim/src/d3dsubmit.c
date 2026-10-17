@@ -147,7 +147,8 @@ static uint64_t sub_upd_bytes(D3DObj*o,uint32_t sub,const uint32_t*b,uint32_t sr
     uint64_t sd=sdp?sdp:sr*(r1-r0); return (uint64_t)(bk-fr-1)*sd+(uint64_t)(r1-r0-1)*sr+rowbytes; }
 static void MSABI ctx_UpdateSubresource(void*t,void*res,uint32_t sub,const void*box,const void*src,uint32_t srp,uint32_t sdp){
     D3DObj*o=res; if(!sub_on() || !o || !o->data || !src){ ctxi_UpdateSubresource(t,res,sub,box,src,srp,sdp); return; }
-    sub_start(); uint64_t n=sub_upd_bytes(o,sub,box,srp,sdp); if(!n || n>(256u<<20)) return;
+    sub_start(); uint64_t n=sub_upd_bytes(o,sub,box,srp,sdp); if(!n) return;
+    if(n>(256u<<20)){ sub_drain(); ctxi_UpdateSubresource(t,res,sub,box,src,srp,sdp); return; }   // too big to copy: run it in order, inline (was dropped)
     uint8_t*copy=malloc((size_t)n); if(!copy){ sub_drain(); ctxi_UpdateSubresource(t,res,sub,box,src,srp,sdp); return; } memcpy(copy,src,(size_t)n);
     SqUpd*u=(SqUpd*)sub_alloc(SQ_UPDSUB,sizeof(SqUpd)); u->res=res; u->sub=sub; u->srp=srp; u->sdp=sdp; u->hasbox=box!=0; if(box) memcpy(u->box,box,24); u->data=copy; sub_push(); o->sq_wpend=g_sq_head; }
 static void MSABI ctx_CopyResource(void*t,void*dst,void*src){ if(!sub_on()){ ctxi_CopyResource(t,dst,src); return; } sub_start();
@@ -219,7 +220,7 @@ static void sub_present(void){
         g_sq_ncmd=g_sq_nstate=g_sq_waitfull=g_sq_waitframe=g_sq_drains=0; g_sq_waitms=0; } } }
 
 // ---- the GL thread ------------------------------------------------------------------------------------------------------
-static D3DObj* g_sq_qpend[256]; static int g_sq_nqpend;   // ended occlusion queries whose results aren't back yet
+static D3DObj** g_sq_qpend; static int g_sq_nqpend, g_sq_qcap;   // ended occlusion queries whose results aren't back yet (grows)
 static void sub_harvest_queries(void){
     if(!g_sq_nqpend || !G.GetQueryObjectiv) return; GLLOCK(); if(CGLGetCurrentContext()!=g_d3dgl_cgl) CGLSetCurrentContext(g_d3dgl_cgl);
     for(int i=0;i<g_sq_nqpend;){ D3DObj*o=g_sq_qpend[i]; int av=0; if(o->glq) G.GetQueryObjectiv(o->glq,0x8867/*RESULT_AVAILABLE*/,&av); else av=1;
@@ -244,7 +245,9 @@ static void sub_exec(uint32_t type,uint8_t*p){
     case SQ_CLEAR_UAV: { SqClearUav*c=(SqClearUav*)p; cs_clear_uav(c->view,c->val); break; }
     case SQ_BEGIN: { D3DObj*o=*(D3DObj**)p; uint32_t keep=o->qstate; ctxi_Begin(0,o); o->qstate=keep; break; }
     case SQ_END: { D3DObj*o=*(D3DObj**)p; uint32_t keep=o->qstate; uint64_t qv=o->qval; ctxi_End(0,o); o->qstate=keep;
-        if(o->sd[0]==1||o->sd[0]==5){ o->qval=qv; if(g_sq_nqpend<256) g_sq_qpend[g_sq_nqpend++]=o; else __atomic_store_n(&o->rvalid,1,__ATOMIC_RELEASE); } break; }
+        if(o->sd[0]==1||o->sd[0]==5){ o->qval=qv;
+            if(g_sq_nqpend==g_sq_qcap){ int nc=g_sq_qcap?g_sq_qcap*2:256; D3DObj**q=realloc(g_sq_qpend,(size_t)nc*sizeof *q); if(q){ g_sq_qpend=q; g_sq_qcap=nc; } }
+            if(g_sq_nqpend<g_sq_qcap) g_sq_qpend[g_sq_nqpend++]=o; else __atomic_store_n(&o->rvalid,1,__ATOMIC_RELEASE); } break; }   // (over 256 used to report a stale result)
     case SQ_PRESENT: d3dgl_present(); g_hb_taken=0; sub_harvest_queries(); __atomic_add_fetch(&g_sq_pres_done,1,__ATOMIC_ACQ_REL); break;
     case SQ_FENCE: __atomic_store_n(&g_sq_fence_done,*(uint64_t*)p,__ATOMIC_RELEASE); break;
     } }
