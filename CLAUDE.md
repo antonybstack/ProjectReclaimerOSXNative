@@ -109,7 +109,13 @@ monitor, `PELOAD_DXGI_NO_OUTPUT` = no output). The engine's swap chain takes Cre
 Reclaimer's Rendering resolution IS the swap-chain size (Default = the display's size borderless, 1920x1080 windowed).
 EnumDisplaySettingsW wrote DEVMODEA offsets ("Your display: 0 x 0"). The present queue's frame textures used to be
 1280x720 (g_d3dgl_W/H), so every frame reached the window at 720p; they now keep the back buffer's size. `PELOAD_TRACE_SWAP`
-logs swap-chain sizes. GetClientRect/GetSystemMetrics still report the 1280x720 client space (input coordinates).
+logs swap-chain sizes. The client space (GetClientRect/GetWindowRect/GetSystemMetrics, mouse coordinates) = the display size too
+(cli_init; `PELOAD_CLIENT_SIZE=1280x720` = old): Reclaimer draws its menu / loading screen / overlays at the client size (egui
+in its WGL context, glReadPixels, UpdateSubresource into the frame), so at a fixed 1280x720 they were stretched 2x on a 1440p
+display. Guest glReadPixels go through a pixel-pack buffer (readpx_pbo; 6.8 -> 2.0 ms at 2560x1440; PELOAD_READPX_DIRECT = old,
+PELOAD_READPX_STATS). PELOAD_AUTOCLICK / KBM_TEST_CLICK coordinates stay 1280x720 and are scaled. Faults on loader threads
+(no TLS array at gs:0x58) are no longer passed to the guest's VEH: Rust's handler crashed in its stderr lock (exe+0x1d6455d)
+and hid the real fault; the [CRASH] report now names loader functions and prints a native backtrace.
 Correctness/safety fixes (2026-10-17, branch display-resolution-and-fixes): SleepConditionVariableSRW lost wake-ups
 (per-CV mutex; msvcp140's std::condition_variable), WaitForMultipleObjects honors timeouts / waits on processes, Win32
 mutexes recursive + owned. RemoveDirectoryW / directory delete-on-close only recurse strictly below drive_c and not under

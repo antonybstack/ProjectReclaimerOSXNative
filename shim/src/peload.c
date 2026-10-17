@@ -3272,8 +3272,17 @@ static int    MSABI i_GetMonitorInfoW(void*h,uint8_t*mi){ (void)h; if(!mi) retur
 // 1280x720). Reporting a different size makes the engine size its framebuffer/
 // readback to the wrong dimensions -> glReadPixels reads past the real drawable
 // (OOB crash) and buffer sizes mismatch (corruption).
-#define WIN_W 1280
-#define WIN_H 720
+// The client space (GetClientRect / GetWindowRect / GetSystemMetrics, mouse coordinates) = the display's size, as
+// for the borderless full-screen window the client asks for (SetWindowPos 0,0,<display>). Reclaimer sizes its menu,
+// loading screen and in-game overlays to it; at a fixed 1280x720 they were drawn at 720p and stretched to the
+// window. PELOAD_CLIENT_SIZE=<w>x<h> overrides (1280x720 = old).
+static int g_cli_w, g_cli_h;
+static void cli_init_once(void){ int w=0,h=0; const char*e=getenv("PELOAD_CLIENT_SIZE");
+    if(!(e && sscanf(e,"%dx%d",&w,&h)==2 && w>=320 && h>=200 && w<=8192 && h<=8192)){ uint32_t dw=0,dh=0; disp_size(&dw,&dh,0); w=(int)dw; h=(int)dh; }
+    if(w<320||h<200){ w=1280; h=720; } g_cli_h=h; g_cli_w=w; }
+static inline void cli_init(void){ static pthread_once_t once=PTHREAD_ONCE_INIT; if(__builtin_expect(!__atomic_load_n(&g_cli_w,__ATOMIC_ACQUIRE),0)) pthread_once(&once,cli_init_once); }
+#define WIN_W (cli_init(),g_cli_w)
+#define WIN_H (cli_init(),g_cli_h)
 static int    MSABI i_GetSystemMetrics(int idx){ switch(idx){ case 0:return WIN_W; case 1:return WIN_H; case 4:return 0; default:return 0; } }
 // EnumDisplayMonitors: report the one (primary) monitor that MonitorFromWindow/GetMonitorInfoW
 // describe. It used to return TRUE without calling the callback, so Reclaimer saw zero monitors and its egui
@@ -3285,7 +3294,8 @@ static int    MSABI i_EnumDisplayMonitors(void*dc,const void*clip,void*cb,int64_
     fn(mon,dc,rc,data); return 1; }
 static int    MSABI i_GetClientRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
 static int    MSABI i_GetWindowRect(void*h,int32_t*r){ (void)h; if(r){r[0]=0;r[1]=0;r[2]=WIN_W;r[3]=WIN_H;} return 1; }
-static int    MSABI i_SetWindowPos(void*h,void*after,int x,int y,int w,int ht,uint32_t f){ (void)h;(void)after;(void)x;(void)y;(void)w;(void)ht;(void)f; return 1; }
+static int    MSABI i_SetWindowPos(void*h,void*after,int x,int y,int w,int ht,uint32_t f){ (void)after;
+    if(GENV1("PELOAD_TRACE_WINPOS")){ char m[160]; int k=snprintf(m,sizeof m,"  [SetWindowPos] hwnd=%p %d,%d %dx%d flags=0x%x\n",h,x,y,w,ht,f); (void)!write(2,m,k); } return 1; }
 static int64_t g_winlong[8];
 static int64_t MSABI i_GetWindowLongPtrW(void*h,int idx){ WWin*w=h; if(w&&w->magic==WWIN_MAGIC){ if(idx==-21)return w->userdata; if(idx==-4)return (int64_t)(intptr_t)w->wndproc; if(idx>=0&&idx<128)return w->extra[idx/8]; return 0; } return (idx>=-8&&idx<0)? g_winlong[-idx-1]:0; }
 static int64_t MSABI i_SetWindowLongPtrW(void*h,int idx,int64_t v){ WWin*w=h; if(w&&w->magic==WWIN_MAGIC){ int64_t o=0; if(idx==-21){o=w->userdata;w->userdata=v;} else if(idx==-4){o=(int64_t)(intptr_t)w->wndproc;w->wndproc=(WNDPROC_t)(intptr_t)v;} else if(idx>=0&&idx<128){o=w->extra[idx/8];w->extra[idx/8]=v;} return o; } if(idx>=-8&&idx<0){ int64_t o=g_winlong[-idx-1]; g_winlong[-idx-1]=v; return o;} return 0; }
@@ -3315,7 +3325,8 @@ static int    MSABI i_GetDeviceCaps(void*hdc,int index){ (void)hdc;
         case 24: return -1;                              // NUMCOLORS (true colour)
         case 2: return 1;                                // TECHNOLOGY: DT_RASDISPLAY
         default: return 0; } }
-static int    MSABI i_MoveWindow(void*h,int x,int y,int w,int ht,int rp){ (void)h;(void)x;(void)y;(void)w;(void)ht;(void)rp; return 1; }
+static int    MSABI i_MoveWindow(void*h,int x,int y,int w,int ht,int rp){ (void)rp;
+    if(GENV1("PELOAD_TRACE_WINPOS")){ char m[160]; int k=snprintf(m,sizeof m,"  [MoveWindow] hwnd=%p %d,%d %dx%d\n",h,x,y,w,ht); (void)!write(2,m,k); } return 1; }
 static void*  MSABI i_SetFocus(void*h){ return h; }
 static void*  MSABI i_SetCapture(void*h){ return h; }
 static int    MSABI i_ReleaseCapture(void){ return 1; }
@@ -3337,8 +3348,8 @@ void* fg_hwnd_ext(void);
 // The one monitor we report (GetMonitorInfo, EnumDisplayMonitors, EnumDisplaySettings, GetDeviceCaps; borderless
 // windows and 0x0 swap chains take its size): the Mac's main display in pixels, as Windows reports a monitor, fitted
 // into 4096x4096 (the GL path's texture limit). PELOAD_DISPLAY_SIZE=<w>x<h> overrides (=1920x1080 = the old fixed one).
-static void disp_size(uint32_t*w,uint32_t*h,uint32_t*hz){ static uint32_t W,H,HZ;
-    if(!W){ const char*e=getenv("PELOAD_DISPLAY_SIZE"); unsigned a=0,b=0; HZ=60;
+static uint32_t g_disp_W,g_disp_H,g_disp_HZ;
+static void disp_size_init(void){ uint32_t W=0,H=0,HZ; { const char*e=getenv("PELOAD_DISPLAY_SIZE"); unsigned a=0,b=0; HZ=60;
         CGDisplayModeRef m=CGDisplayCopyDisplayMode(CGMainDisplayID());
         if(m){ double r=CGDisplayModeGetRefreshRate(m); if(r>=24 && r<=500) HZ=(uint32_t)(r+0.5); }
         if(e && sscanf(e,"%ux%u",&a,&b)==2 && a>=640 && b>=480 && a<=4096 && b<=4096){ W=a; H=b; }
@@ -3346,7 +3357,10 @@ static void disp_size(uint32_t*w,uint32_t*h,uint32_t*hz){ static uint32_t W,H,HZ
             if(W>4096||H>4096){ double s=W>H?4096.0/W:4096.0/H; W=(uint32_t)(W*s)&~1u; H=(uint32_t)(H*s)&~1u; } }
         if(m) CGDisplayModeRelease(m);
         if(W<640||H<480){ W=1920; H=1080; } }
-    if(w) *w=W; if(h) *h=H; if(hz) *hz=HZ; }
+    g_disp_W=W; g_disp_H=H; g_disp_HZ=HZ; }
+// once: callers on several threads at startup must never see a half-set size
+static void disp_size(uint32_t*w,uint32_t*h,uint32_t*hz){ static pthread_once_t once=PTHREAD_ONCE_INIT; pthread_once(&once,disp_size_init);
+    if(w) *w=g_disp_W; if(h) *h=g_disp_H; if(hz) *hz=g_disp_HZ; }
 #include "wininput.c"
 static int    MSABI i_SetLayeredWindowAttributes(void*h,uint32_t key,uint8_t a,uint32_t f){ (void)h;(void)key;(void)a;(void)f; return 1; }
 static int    MSABI i_UpdateLayeredWindow(void*h,void*dc,void*pd,void*ps,void*sd,void*sp,uint32_t key,void*bf,uint32_t f){ (void)h;(void)dc;(void)pd;(void)ps;(void)sd;(void)sp;(void)key;(void)bf;(void)f; return 1; }
@@ -7221,9 +7235,35 @@ static void MSABI i_glTexSubImage2D(unsigned t,int l,int xo,int yo,int w,int h,u
 static void MSABI i_glTextureSubImage2D(unsigned tex,int l,int xo,int yo,int w,int h,unsigned fmt,unsigned type,const void*d){
     if(getenv("PELOAD_TRACE_TEX")) gl_check_src("glTextureSubImage2D",w,h,fmt,type,d);
     void(*r)(unsigned,int,int,int,int,int,unsigned,unsigned,const void*)=glp_dlsym("glTextureSubImage2D"); if(r)r(tex,l,xo,yo,w,h,fmt,type,d); }
+// Guest readbacks (Reclaimer reads its client-space UI back every frame it changes: 14.7 MB at 2560x1440) go through a
+// pixel-pack buffer: the GPU detiles and converts into the buffer and the CPU only copies it out. A plain glReadPixels
+// into memory did both in Apple's driver on the CPU, translated by Rosetta. PELOAD_READPX_DIRECT = old;
+// PELOAD_READPX_STATS logs the time per readback every 2 s.
+static int readpx_pbo(int x,int y,int w,int h,unsigned fmt,unsigned type,void*d){
+    static int off=-1; if(off<0) off=getenv("PELOAD_READPX_DIRECT")?1:0;
+    if(off || !d || w<256 || h<64 || type!=0x1401/*UNSIGNED_BYTE*/ || (fmt!=0x1908/*RGBA*/ && fmt!=0x80E1/*BGRA*/)) return 0;
+    static void(*gi)(unsigned,int*); static void(*gb)(int,unsigned*); static void(*bb)(unsigned,unsigned); static void(*bd)(unsigned,intptr_t,const void*,unsigned);
+    static void(*rp)(int,int,int,int,unsigned,unsigned,void*); static void*(*mr)(unsigned,intptr_t,intptr_t,unsigned); static unsigned char(*um)(unsigned);
+    if(!gi){ gb=glp_dlsym("glGenBuffers"); bb=glp_dlsym("glBindBuffer"); bd=glp_dlsym("glBufferData"); rp=glp_dlsym("glReadPixels");
+        mr=glp_dlsym("glMapBufferRange"); um=glp_dlsym("glUnmapBuffer"); gi=glp_dlsym("glGetIntegerv"); }
+    if(!gi||!gb||!bb||!bd||!rp||!mr||!um) return 0;
+    int pk=0,rl=0,sp=0,sr=0,al=4; gi(0x88ED/*PIXEL_PACK_BUFFER_BINDING*/,&pk); gi(0x0D02/*PACK_ROW_LENGTH*/,&rl); gi(0x0D04/*PACK_SKIP_PIXELS*/,&sp); gi(0x0D03/*PACK_SKIP_ROWS*/,&sr);
+    if(pk||rl||sp||sr) return 0;   // the guest's own pack buffer / layout: leave it alone (4-byte pixels: alignment never pads)
+    (void)al; CGLContextObj c=CGLGetCurrentContext(); if(!c) return 0;
+    enum { NPB=8 }; static struct { CGLContextObj c; unsigned pbo; size_t cap; } t[NPB]; static pthread_mutex_t mx=PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mx); int i=0; for(; i<NPB && t[i].c && t[i].c!=c; i++){} if(i==NPB){ pthread_mutex_unlock(&mx); return 0; }
+    if(!t[i].c){ t[i].c=c; gb(1,&t[i].pbo); } unsigned pbo=t[i].pbo; size_t n=(size_t)w*h*4;
+    bb(0x88EB/*PIXEL_PACK_BUFFER*/,pbo); if(n>t[i].cap){ bd(0x88EB,(intptr_t)n,0,0x88E9/*STREAM_READ*/); t[i].cap=n; } pthread_mutex_unlock(&mx);
+    rp(x,y,w,h,fmt,type,0); void*m=mr(0x88EB,0,(intptr_t)n,0x0001/*MAP_READ_BIT*/);
+    if(m){ memcpy(d,m,n); um(0x88EB); } bb(0x88EB,0);
+    if(!m){ rp(x,y,w,h,fmt,type,d); } return 1; }
 static void MSABI i_glReadPixels(int x,int y,int w,int h,unsigned fmt,unsigned type,void*d){
     if(getenv("PELOAD_TRACE_TEX")) gl_check_src("glReadPixels(DST)",w,h,fmt,type,d);
-    void(*r)(int,int,int,int,unsigned,unsigned,void*)=glp_dlsym("glReadPixels"); if(r)r(x,y,w,h,fmt,type,d);
+    static int st=-1; if(st<0) st=getenv("PELOAD_READPX_STATS")?1:0; double t0=st?mono_s():0;
+    int viapbo=readpx_pbo(x,y,w,h,fmt,type,d);
+    if(!viapbo){ void(*r)(int,int,int,int,unsigned,unsigned,void*)=glp_dlsym("glReadPixels"); if(r)r(x,y,w,h,fmt,type,d); }
+    if(st){ static double acc,tl; static unsigned long nr; acc+=mono_s()-t0; nr++; double now=mono_s(); if(!tl) tl=now;
+        if(now-tl>=2.0){ char m[200]; int k=snprintf(m,sizeof m,"  [readpx] %lu readbacks %dx%d fmt=0x%x %s: %.2f ms each\n",nr,w,h,fmt,viapbo?"via PBO":"direct",acc*1000/nr); (void)!write(2,m,k); acc=0; nr=0; tl=now; } }
     if(getenv("PELOAD_TRACE_READPX")){ static int n; if((n++%200)==0){ int fb=0,rb=0,vp[4]={0}; unsigned err=0;
         void(*gi)(unsigned,int*)=glp_dlsym("glGetIntegerv"); unsigned(*ge)(void)=glp_dlsym("glGetError");
         if(gi){ gi(0x8CAA,&fb); gi(0x0C02,&rb); gi(0x0BA2,vp); } if(ge) err=ge();
@@ -10306,7 +10346,11 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
     }
     // First try to dispatch the fault as a Windows exception (the engine faults
     // deliberately inside probes and expects a handler to recover + continue).
-    if(uc && !g_in_crashsig && (sig==SIGILL||sig==SIGSEGV||sig==SIGBUS||sig==SIGFPE||sig==SIGTRAP)){
+    // Only guest threads (a TLS array at gs:0x58): on a loader thread (shim-present, ...) the guest's handlers fault
+    // themselves (Rust's stack-overflow VEH takes the stderr lock through gs:0x58), hiding the real fault behind
+    // a crash in exe code.
+    uint64_t gs58_=0; __asm__ volatile("movq %%gs:0x58,%0":"=r"(gs58_));
+    if(uc && !g_in_crashsig && gs58_ && (sig==SIGILL||sig==SIGSEGV||sig==SIGBUS||sig==SIGFPE||sig==SIGTRAP)){
         g_in_crashsig=1;
         // unblock these so a nested fault during dispatch isn't silently fatal
         sigset_t us; sigemptyset(&us); sigaddset(&us,SIGILL); sigaddset(&us,SIGSEGV);
@@ -10327,6 +10371,7 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
         if(rip>=(uint64_t)g_base && rip<(uint64_t)g_base+o->ImageSize){ mod="exe"; moff=rip-(uint64_t)g_base; } }
     for(int m=0;m<g_nmods && !moff;m++){ DOS*d=(DOS*)g_mods[m].base; OPT64*o=(OPT64*)(g_mods[m].base+d->e_lfanew+sizeof(COFF));
         if(rip>=(uint64_t)g_mods[m].base && rip<(uint64_t)g_mods[m].base+o->ImageSize){ mod=g_mods[m].name; moff=rip-(uint64_t)g_mods[m].base; } }
+    Dl_info cdi; if(!moff && dladdr((void*)rip,&cdi) && cdi.dli_sname){ mod=cdi.dli_sname; moff=rip-(uint64_t)cdi.dli_saddr; }   // loader / system code
     int n=snprintf(b,sizeof b,"\n[CRASH] sig=%d faultaddr=%p RIP=0x%llx (%s+0x%llx)\n",sig,info?info->si_addr:0,(unsigned long long)rip,mod,(unsigned long long)moff);
     (void)!write(2,b,n);
     { int k=snprintf(b,sizeof b,"    [d3dgl] last phase=%s draw#=%lu\n",g_d3dgl_phase?(const char*)g_d3dgl_phase:"?",g_d3dgl_phase_draw); (void)!write(2,b,k); }
@@ -10336,6 +10381,7 @@ static void crashsig(int sig, siginfo_t *info, void *ucv){
       int nn=snprintf(b,sizeof b,"    gs:0x58(tls_array)=0x%llx  tls[0]=0x%llx  mach_tid=0x%x  mainthr=%d  thread='%s'\n",
         (unsigned long long)gs58,(unsigned long long)t0,pthread_mach_thread_np(pthread_self()),pthread_main_np(),tn);
       (void)!write(2,b,nn); }
+    if(!gs58_){ void*bt[32]; int nb=backtrace(bt,32); backtrace_symbols_fd(bt,nb,2); }   // loader thread: its own (SysV) frames
     // manual stack scan: Win64 code defeats backtrace(); find return addresses
     // that land inside a loaded module and print module+offset (the call chain).
     uint64_t rsp = uc? (uint64_t)uc->uc_mcontext->__ss.__rsp : 0; int printed=0;

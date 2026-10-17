@@ -86,7 +86,8 @@ static int MSABI wi_GetKeyboardState(uint8_t*s){ if(!s) return 0; for(int i=0;i<
 
 // ---- cursor ----
 static int g_wi_captured, g_wi_cursor_count;   // ShowCursor counter (>=0 visible)
-static int32_t g_wi_cx=WIN_W/2, g_wi_cy=WIN_H/2;   // last client-space pointer position
+static int32_t g_wi_cx=-1, g_wi_cy=-1;   // last client-space pointer position (-1: the centre, set on first use)
+static void wi_cur_init(void){ if(g_wi_cx<0){ g_wi_cx=WIN_W/2; g_wi_cy=WIN_H/2; } }
 // Unattended input self-tests (PELOAD_KBM_TEST) and PELOAD_NO_SYS_CURSOR never capture or hide the real
 // macOS cursor: the guest still sees its pointer captured, but whoever is using the Mac keeps their mouse.
 static int wi_syscursor(void){ static int ok=-1; if(ok<0) ok=!(getenv("PELOAD_KBM_TEST")||getenv("PELOAD_NO_SYS_CURSOR")); return ok; }
@@ -101,7 +102,7 @@ static int MSABI wi_ShowCursor(int show){
     if(before>=0 && g_wi_cursor_count<0) CGDisplayHideCursor(kCGDirectMainDisplay);
     else if(before<0 && g_wi_cursor_count>=0) CGDisplayShowCursor(kCGDirectMainDisplay);
     return g_wi_cursor_count; }
-static int MSABI wi_GetCursorPos(int32_t*p){ if(p){ p[0]=g_wi_cx; p[1]=g_wi_cy; } return 1; }
+static int MSABI wi_GetCursorPos(int32_t*p){ wi_cur_init(); if(p){ p[0]=g_wi_cx; p[1]=g_wi_cy; } return 1; }
 static int MSABI wi_SetCursorPos(int x,int y){ g_wi_cx=x; g_wi_cy=y; return 1; }   // (pointer stays put while captured)
 
 // ---- macOS keyCode -> Windows VK + set-1 scan code (+E0) ----
@@ -139,7 +140,7 @@ static void wi_key(unsigned short kc,int down,int repeat){
 // F2-F5 toggle the overlay features (hitbox.c: hitboxes, projectile tracers, player info, items); not forwarded to the game.
 static volatile int g_hb_toggle, g_hb_teamcycle;   // F6 cycles the team filter (all -> enemies -> friends)
 // ---- NSEvent translation (main thread, from cocoa_pump). Returns 1 = consumed (don't forward to AppKit). ----
-static int wi_translate(id ev){
+static int wi_translate(id ev){ wi_cur_init();
     static int off=-1; if(off<0) off=getenv("PELOAD_NO_KBM")?1:0;
     if(off){ unsigned long t=((unsigned long(*)(id,SEL))objc_msgSend)(ev,sel_registerName("type")), md=((unsigned long(*)(id,SEL))objc_msgSend)(ev,sel_registerName("modifierFlags"));
         return (t==10||t==11) && !(md&(1ul<<20)); }   // input-less test client: swallow keys (no system beep), keep Cmd shortcuts
@@ -224,9 +225,9 @@ static void* wi_test_thread(void*a){ (void)a; pthread_setname_np("shim-kbmtest")
     for(int i=0;i<100;i++){ wi_raw_mouse(8,0,0,0); usleep(20000); }
     wi_key(0x0D,0,0);   // W up
     k=snprintf(m,sizeof m,"  [kbm-test] W held 2 s + mouse sweep done\n"); (void)!write(2,m,k);
-    // PELOAD_KBM_TEST_CLICK=<x>,<y>[;<x>,<y>...] -- then move to and left-click each window point, 2 s apart
+    // PELOAD_KBM_TEST_CLICK=<x>,<y>[;<x>,<y>...] -- then move to and left-click each point (1280x720 coordinates, scaled), 2 s apart
     { const char*e=getenv("PELOAD_KBM_TEST_CLICK"); while(e && *e){ int cx=0,cy=0; if(sscanf(e,"%d,%d",&cx,&cy)!=2) break;
-        usleep(2000000); int64_t lp=(int64_t)((cy<<16)|(cx&0xffff));
+        usleep(2000000); cx=cx*WIN_W/1280; cy=cy*WIN_H/720; int64_t lp=(int64_t)((cy<<16)|(cx&0xffff));
         wi_post(h,0x0200,0,lp); usleep(100000);
         g_keydown[1]=1; wi_raw_mouse(0,0,0x1,0); wi_post(h,0x0201,1,lp); usleep(80000);
         g_keydown[1]=0; wi_raw_mouse(0,0,0x2,0); wi_post(h,0x0202,0,lp);
@@ -239,13 +240,13 @@ static void* wi_test_thread(void*a){ (void)a; pthread_setname_np("shim-kbmtest")
         usleep((useconds_t)(secs*1e6)); wi_key((uint16_t)kc,0,0); k=snprintf(m,sizeof m,"  [kbm-test] key 0x%x up\n",kc); (void)!write(2,m,k); } }
     return 0; }
 // PELOAD_AUTOCLICK="<step>;<step>;...": drive the client's own UI once its menu is up, e.g. so an instance with
-// no real input (a test target) can host a game by itself. Steps, in 1280x720 client coordinates:
+// no real input (a test target) can host a game by itself. Steps, in 1280x720 coordinates (scaled to the client space):
 //   x,y            left-click there            w:x,y,n   mouse wheel n notches there (+ up, - down)
 //   s:secs         wait                        k:hex     press + release a key (macOS keycode)
 //   t:text         type text (WM_CHAR)
 // Each click/wheel/key is followed by PELOAD_AUTOCLICK_GAP s (default 1.5). Starts PELOAD_AUTOCLICK_DELAY s
 // (default 3) after "Menu loading screen finished". Never touches the real cursor.
-static void wi_click_at(void*h,int x,int y){ int64_t lp=(int64_t)((y<<16)|(x&0xffff)); g_wi_cx=x; g_wi_cy=y;
+static void wi_click_at(void*h,int x,int y){ x=x*WIN_W/1280; y=y*WIN_H/720; int64_t lp=(int64_t)((y<<16)|(x&0xffff)); g_wi_cx=x; g_wi_cy=y;
     wi_post(h,0x0200,0,lp); usleep(100000);
     g_keydown[1]=1; wi_raw_mouse(0,0,0x1,0); wi_post(h,0x0201,1,lp); usleep(80000);
     g_keydown[1]=0; wi_raw_mouse(0,0,0x2,0); wi_post(h,0x0202,0,lp); }
@@ -254,7 +255,7 @@ static void wi_run_steps(void*h,const char*e,useconds_t gap){ char m[96]; int k;
     for(; e && *e; e=strchr(e,';')?strchr(e,';')+1:0){
         int x=0,y=0,n=0; double secs=0; unsigned kc=0;
         if(sscanf(e,"s:%lf",&secs)==1){ usleep((useconds_t)(secs*1e6)); continue; }
-        if(sscanf(e,"w:%d,%d,%d",&x,&y,&n)==3){ int64_t lp=(int64_t)((y<<16)|(x&0xffff)); g_wi_cx=x; g_wi_cy=y; wi_post(h,0x0200,0,lp);
+        if(sscanf(e,"w:%d,%d,%d",&x,&y,&n)==3){ x=x*WIN_W/1280; y=y*WIN_H/720; int64_t lp=(int64_t)((y<<16)|(x&0xffff)); g_wi_cx=x; g_wi_cy=y; wi_post(h,0x0200,0,lp);
             for(int i=0;i<(n<0?-n:n);i++){ int16_t d=(int16_t)(n<0?-120:120); wi_raw_mouse(0,0,0x400,d); wi_post(h,0x020A,(uint64_t)((uint32_t)(uint16_t)d<<16),lp); usleep(60000); }
             k=snprintf(m,sizeof m,"  [autoclick] wheel %d at %d,%d\n",n,x,y); }
         else if(!strncmp(e,"t:",2)){ const char*t=e+2; int c=0; for(; t[c] && t[c]!=';'; c++){ wi_post(h,0x0102/*WM_CHAR*/,(uint64_t)(uint8_t)t[c],1); usleep(40000); }
