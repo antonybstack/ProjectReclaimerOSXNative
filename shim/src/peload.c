@@ -154,6 +154,7 @@ static char g_drivec[1024];        // abs path of the Wine prefix's drive_c
 static char *g_fdpath[MAXFD];       // boxed-fd -> real unix path
 static DIR  *g_fddir[MAXFD];        // boxed-fd -> open dir stream (lazy)
 static int   g_fddel[MAXFD];        // delete-on-close flag
+static pthread_mutex_t g_fdmx=PTHREAD_MUTEX_INITIALIZER;   // g_fdpath/g_fddel writers + cross-fd scans (CloseHandle)
 static char* win2unix(const uint16_t*, char*, int);  // fwd
 static void  unix2win(const char*, uint16_t*, int);   // fwd
 static void  unix2win_ex(const char*, uint16_t*, int, int);   // fwd
@@ -8032,7 +8033,7 @@ static int MSABI i_SetFileInformationByHandle(void*h,int cls,void*info,uint32_t 
         }
         int rr=rename(g_fdpath[fd],newp);
         if(getenv("PELOAD_TRACE_FS")){ char t[96]; int k=snprintf(t,sizeof t,"  [rename cls=%d] -> %d ",cls,rr); ws(t); ws(g_fdpath[fd]); ws(" => "); ws(newp); ws("\n"); }
-        if(rr==0){ free(g_fdpath[fd]); g_fdpath[fd]=strdup(newp); g_fddel[fd]=0; }
+        if(rr==0){ char*n=strdup(newp); pthread_mutex_lock(&g_fdmx); char*o=g_fdpath[fd]; g_fdpath[fd]=n; g_fddel[fd]=0; pthread_mutex_unlock(&g_fdmx); free(o); }
         else { g_lasterr=win_err(); return 0; }
         return 1;
     }
@@ -8248,7 +8249,7 @@ static void* MSABI i_LoadLibraryExW(const uint16_t *name, void *h, uint32_t fl){
 
 // ---- filesystem shim: translate Windows paths to Unix, do real I/O ----
 // drive mapping: C:\ -> $prefix/drive_c, Z:\ -> /, others -> $prefix/drive_<x>
-static void fd_record(int fd, const char *unixpath){ if(fd>=0&&fd<MAXFD){ free(g_fdpath[fd]); g_fdpath[fd]=strdup(unixpath); if(g_fddir[fd]){closedir(g_fddir[fd]);g_fddir[fd]=0;} g_fddel[fd]=0; } }
+static void fd_record(int fd, const char *unixpath){ if(fd>=0&&fd<MAXFD){ char*n=strdup(unixpath); pthread_mutex_lock(&g_fdmx); char*o=g_fdpath[fd]; g_fdpath[fd]=n; g_fddel[fd]=0; pthread_mutex_unlock(&g_fdmx); free(o); if(g_fddir[fd]){closedir(g_fddir[fd]);g_fddir[fd]=0;} } }
 // mkdir -p for a file path's parent chain (scratch mirror needs this)
 static void mkparents(const char *path){ char t[2300]; snprintf(t,sizeof t,"%s",path); for(char*p=t+1;*p;p++){ if(*p=='/'){ *p=0; mkdir(t,0755); *p='/'; } } }
 // reverse of win2unix: unix path -> \\?\ Windows path (best effort)
@@ -8641,11 +8642,14 @@ static int    MSABI i_CloseHandleReal(void*h){ intptr_t hv=(intptr_t)h;
         // when no OTHER open handle still references the same path. This lets
         // the client delete scratch sub-dirs (files & dirs) without yanking the
         // top scratch dir out from under a still-open session handle.
+        // (the scan reads other fds' paths: under g_fdmx, the delete itself outside it)
+        char *del=0; pthread_mutex_lock(&g_fdmx);
         if(g_fddel[fd]&&g_fdpath[fd]){ char *path=g_fdpath[fd]; int other=0;
             for(int i=0;i<MAXFD;i++) if(i!=fd && g_fdpath[i] && !strcmp(g_fdpath[i],path)){ other=1; break; }
             int keepadv = getenv("PELOAD_KEEP_ADV") && strstr(path,"local-servers") && strstr(path,".json");
-            if(!other && !keepadv){ if(getenv("PELOAD_TRACE_FS")){ws("  [del-on-close] ");ws(path);ws("\n");} struct stat ds; if(stat(path,&ds)==0){ if(S_ISDIR(ds.st_mode)) (void)rmdir_win(path,"del-on-close"); else unlink(path); } } }
-        free(g_fdpath[fd]); g_fdpath[fd]=0; g_fddel[fd]=0; }
+            if(!other && !keepadv){ del=path; g_fdpath[fd]=0; } }
+        free(g_fdpath[fd]); g_fdpath[fd]=0; g_fddel[fd]=0; pthread_mutex_unlock(&g_fdmx);
+        if(del){ if(getenv("PELOAD_TRACE_FS")){ws("  [del-on-close] ");ws(del);ws("\n");} struct stat ds; if(stat(del,&ds)==0){ if(S_ISDIR(ds.st_mode)) (void)rmdir_win(del,"del-on-close"); else unlink(del); } free(del); } }
     close(fd); } return 1; }
 // env var lookup via the host environment (so RECLAIMER_* pass through)
 static uint32_t MSABI i_GetEnvironmentVariableW(const uint16_t*n,uint16_t*v,uint32_t sz){
