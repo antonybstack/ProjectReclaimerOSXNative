@@ -110,6 +110,14 @@ Reclaimer's Rendering resolution IS the swap-chain size (Default = the display's
 EnumDisplaySettingsW wrote DEVMODEA offsets ("Your display: 0 x 0"). The present queue's frame textures used to be
 1280x720 (g_d3dgl_W/H), so every frame reached the window at 720p; they now keep the back buffer's size. `PELOAD_TRACE_SWAP`
 logs swap-chain sizes. GetClientRect/GetSystemMetrics still report the 1280x720 client space (input coordinates).
+Correctness/safety fixes (2026-10-17, branch display-resolution-and-fixes): SleepConditionVariableSRW lost wake-ups
+(per-CV mutex; msvcp140's std::condition_variable), WaitForMultipleObjects honors timeouts / waits on processes, Win32
+mutexes recursive + owned. RemoveDirectoryW / directory delete-on-close only recurse strictly below drive_c and not under
+Program Files (rmrf_allowed; every case logged "not empty"; `PELOAD_RMDIR_LAX` = old rm -rf anywhere) and return real
+errors. Stats server refuses Host headers that aren't localhost / an IP literal (DNS rebinding), no wildcard CORS, 5 s
+idle timeout. UTF-8 <-> UTF-16 everywhere strings cross (w2u8/u82w[_n]: paths, listings, env, command lines,
+Multi/WideChar for CP_ACP+CP_UTF8). `getenv("PELOAD_...")` with a literal is a per-site static (GENV1) via the getenv
+macro: the cached lookup ran ~15x per draw and once per HeapAlloc.
 Perf (2026-10-16, M4, 1280x720 window, 1920x1080 internal): gameplay median ~116 fps, p10 ~80,
 min ~50 (3-min soak). Draw-call bound: ~3.6 us per glDraw* in GL-on-Metal x ~1200-2300 draws/frame;
 the next big step would be a GL submission thread. CPU particle compute runs on a worker thread
