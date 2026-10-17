@@ -80,7 +80,9 @@ does (kqueue `NOTE_EXIT`). If the helper fails to start, the loader logs it and 
 
 ## Switches
 
-- `PELOAD_GL_HELPER=1` — on (off by default). If `peload-gl` is missing or doesn't start, the loader renders in process.
+- `PELOAD_GL_HELPER=1` — on. `play.sh` sets it by default since 2026-10-17 (`PELOAD_GL_HELPER=0` = in process); other
+  launchers (target.sh, quiet-run.sh, dedicated.sh) leave it off. If `peload-gl` is missing or doesn't start, the
+  loader renders in process.
 - `PELOAD_GL_HELPER_STATS=1` — every 2 s: commands/s, helper busy %, frames published / shown per second, GPU waits
   at publish, GL errors.
 - `PELOAD_GL_HELPER_CHECK=1` — the helper calls `glGetError` after every command and logs errors with the function.

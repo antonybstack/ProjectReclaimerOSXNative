@@ -278,10 +278,10 @@ costs about 9 µs in the loader plus Apple's OpenGL driver (both run translated 
 shadow maps), Level of detail, Draw distance, Effects and Decals. The window title shows draws per frame next to the
 frame rate. A 60 Hz display caps what reaches the screen; the title shows the engine's own rate beside it.
 
-**Experimental: native GL helper.** `PELOAD_GL_HELPER=1 bash shim/play.sh` runs the renderer's OpenGL calls in a
-native arm64 process (`shim/build/peload-gl`) instead of Apple's driver translated under Rosetta: about 1.4-1.6x the
-frame rate where draw calls are the limit (Guardian on an M1 Max: ~74 -> ~105 fps). Details and status:
-`shim/docs/gl-helper.md`.
+**Native GL helper.** `play.sh` runs the renderer's OpenGL calls in a native arm64 process (`shim/build/peload-gl`)
+instead of Apple's driver translated under Rosetta: about 1.4-1.6x the frame rate where draw calls are the limit
+(Guardian on an M1 Max: ~74 -> ~105 fps). `PELOAD_GL_HELPER=0 bash shim/play.sh` renders in process as before; if
+the helper is missing or can't start, the loader does that by itself. Details: `shim/docs/gl-helper.md`.
 
 The window opens at the largest 16:9 size that fits your screen (`PELOAD_WIN_SIZE=1280x720` picks a size), can be
 resized, and can go full screen (green button or Ctrl-Cmd-F). Developer and diagnostic switches are documented in
