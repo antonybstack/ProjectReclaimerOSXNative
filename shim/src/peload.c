@@ -5294,20 +5294,37 @@ static long d3dgl_ring_put(const void*src,uint64_t n); static unsigned g_ring; s
 // MapBufferRange/UnmapBuffer instead of one pair each (~1.7 a draw in big games); d3dgl_bind_ubo then only binds.
 // PELOAD_D3DGL_NOCBBATCH = one map per buffer.
 static uint64_t g_cbbatch_n, g_cbbatch_cbs; volatile int g_cbbatch_on=-1;   // PELOAD_AB=cbbatch flips it
-// Constant buffers rewritten with the same bytes: Halo 3 maps and refills most of its cbuffers for every draw, and in a
-// 60-bot scene 78% of those uploads (73% of the bytes, ~4 MB a frame) equal the buffer's previous upload. Within one ring
-// generation the ring is append-only, so that copy is still intact: point the buffer at it again. upcopy holds the bytes
-// last uploaded (exact memcmp, no hashing). PELOAD_D3DGL_NOCBDEDUP = always upload; PELOAD_AB=flag:<secs> switches it.
-static uint64_t g_cbdedup_n, g_cbdedup_bytes;
-static int cb_reuse(D3DObj*cb,uint64_t n){
-    if(!cb->upcopy || cb->upgen!=g_ring_gen || cb->ubosz!=g_ring_gen || cb->glubo!=cb->upoff || cb->uplen<n || cb->upcopy_n!=cb->size) return 0;
-    if(!g_ab_flag || GENV1("PELOAD_D3DGL_NOCBDEDUP") || memcmp(cb->upcopy,cb->data,(size_t)cb->size)) return 0;
-    cb->uboglver=cb->ver; g_cbdedup_n++; g_cbdedup_bytes+=n; return 1; }
-static void cb_keep(D3DObj*cb,uint64_t n){   // after a ring upload: remember its bytes
-    if(!g_ab_flag || GENV1("PELOAD_D3DGL_NOCBDEDUP")){ cb->upgen=0; return; }
+// Constant buffers rewritten with the same bytes: Halo 3 maps and refills most of its cbuffers for every draw. In a 60-bot
+// scene 78% of those uploads (73% of the bytes) equal the buffer's previous upload and another 20% equal a recent upload of
+// a different buffer. Within one ring generation the ring is append-only, so those copies are still intact: point the
+// buffer at one again. upcopy holds the bytes a buffer last uploaded; a match is always an exact memcmp (the content hash
+// only finds candidates among other buffers). PELOAD_D3DGL_NOCBDEDUP = always upload, PELOAD_D3DGL_NOCBSHARE = only the
+// buffer's own last copy (PELOAD_AB=flag:<secs> switches both).
+static uint64_t g_cbdedup_n, g_cbdedup_bytes, g_cbshare_n;
+typedef struct { uint64_t h, off, len, size, cap; uint32_t gen; uint8_t*bytes; } CbShare;
+static CbShare g_cbshare[1024];   // recent ring copies by content hash (direct-mapped; each holds its bytes, <= 16 KB)
+static int cb_share_on(void){ return !GENV1("PELOAD_D3DGL_NOCBSHARE"); }
+static uint64_t cb_hash(const D3DObj*cb){   // candidates only: every 8th word (a match is verified byte for byte)
+    const uint64_t*w=(const uint64_t*)cb->data; uint64_t nw=cb->size/8, h=cb->size*0x9E3779B97F4A7C15ull;
+    for(uint64_t i=0;i<nw;i+=8){ h^=w[i]; h*=0xFF51AFD7ED558CCDull; h^=h>>29; } if(nw){ h^=w[nw-1]; h*=0xC4CEB9FE1A85EC53ull; } return h; }
+static void cb_point(D3DObj*cb,uint64_t off,uint64_t len){   // cb's ring copy is now at off (its bytes = cb->data)
     if(cb->upcopy_n!=cb->size){ free(cb->upcopy); cb->upcopy=malloc((size_t)cb->size); cb->upcopy_n=cb->upcopy?cb->size:0; }
     if(!cb->upcopy){ cb->upgen=0; return; }
-    memcpy(cb->upcopy,cb->data,(size_t)cb->size); cb->uplen=n; cb->upoff=cb->glubo; cb->upgen=g_ring_gen; }
+    memcpy(cb->upcopy,cb->data,(size_t)cb->size); cb->uplen=len; cb->upoff=off; cb->upgen=g_ring_gen; }
+static int cb_reuse(D3DObj*cb,uint64_t n){
+    if(!g_ab_flag || GENV1("PELOAD_D3DGL_NOCBDEDUP")) return 0;
+    if(cb->upcopy && cb->upgen==g_ring_gen && cb->ubosz==g_ring_gen && cb->glubo==cb->upoff && cb->uplen>=n && cb->upcopy_n==cb->size
+       && !memcmp(cb->upcopy,cb->data,(size_t)cb->size)){ cb->uboglver=cb->ver; g_cbdedup_n++; g_cbdedup_bytes+=n; return 1; }
+    if(!cb_share_on() || cb->size>16384) return 0;
+    uint64_t h=cb_hash(cb); CbShare*e=&g_cbshare[h&1023];
+    if(e->h!=h || e->gen!=g_ring_gen || e->size!=cb->size || e->len<n || memcmp(e->bytes,cb->data,(size_t)cb->size)) return 0;
+    cb->glubo=(unsigned)e->off; cb->ubosz=g_ring_gen; cb->uboglver=cb->ver; cb_point(cb,e->off,e->len); g_cbshare_n++; g_cbdedup_bytes+=n; return 1; }
+static void cb_keep(D3DObj*cb,uint64_t n){   // after a ring upload: remember its bytes (glubo = its ring offset+1)
+    if(!g_ab_flag || GENV1("PELOAD_D3DGL_NOCBDEDUP")){ cb->upgen=0; return; }
+    cb_point(cb,cb->glubo,n);
+    if(cb->upgen && cb_share_on() && cb->size<=16384){ uint64_t h=cb_hash(cb); CbShare*e=&g_cbshare[h&1023];
+        if(e->cap<cb->size){ uint8_t*b=realloc(e->bytes,(size_t)cb->size); if(!b) return; e->bytes=b; e->cap=cb->size; }
+        memcpy(e->bytes,cb->data,(size_t)cb->size); e->h=h; e->off=cb->glubo; e->len=n; e->size=cb->size; e->gen=g_ring_gen; } }
 static void d3dgl_ubo_batch(D3DObj*const*cbs,const uint32_t*firsts,const int*nvecs,int count){
     if(g_cbbatch_on<0) g_cbbatch_on=GENV1("PELOAD_D3DGL_NOCBBATCH")?0:1;
     if(count<2 || !g_ring || !G.MapBufferRange || !g_cbbatch_on || GENV1("PELOAD_D3DGL_NORING") || GENV1("PELOAD_D3DGL_NORING_CB")) return;

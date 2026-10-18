@@ -46,8 +46,8 @@ where the loader's own translation dominated; with the helper the driver work is
 
 ## Optimizing with it (2026-10-18)
 
-Measure a change with `PELOAD_AB=flag:<secs>` inside one run: d3dsubmit.c flips `g_ab_flag` (loader) and
-`GlpShared.ab_off` (helper) every `<secs>` and logs `[ab]` lines with fps, draws and the helper's CPU ms per frame for
+Measure a change with `PELOAD_AB=flag:<secs>` inside one run: d3dsubmit.c flips `g_ab_flag` (loader-side changes read
+it; `hflag` flips the helper's `GlpShared.ab_off` instead) every `<secs>` and logs `[ab]` lines with fps, draws and the helper's CPU ms per frame for
 each phase (the first phase is a warm-up and is not counted). On a busy Mac this is the only reliable comparison;
 `BENCH_WAIT=2` doubles the menu waits when the machine is slow. `PELOAD_GL_HELPER_OPS=1` shows where the helper's time
 goes, per GL call.
@@ -56,7 +56,8 @@ goes, per GL call.
 |---|---|---|---|
 | sRGB decode set only when it changes (loader) | 27.4 / 29.2 (-7.4%) | +7.1% | 9 / 8 |
 | Metal pixel-format cache (`peload-gl-pf.dylib`) | 24.2 / 27.3 (-10.7%) | 39.0 / 34.0 (+12.2%) | 8 / 9 |
-| constant buffers refilled with the same bytes reuse their ring copy (loader, `cb_reuse`) | 18.9 / 24.4 (-22.5%) | 54.4 / 41.6 (+30.8%) | 9 / 8 |
+| constant buffers refilled with the same bytes reuse their own last ring copy (loader, `cb_reuse`) | 19.2 / 22.3 (-12.8%) | 51.8 / 44.5 (+15.7%) | 9 / 8 |
+| ... and identical copies of other recent uploads (`g_cbshare`) | 19.8 / 23.8 (-16.8% for both) | 48.5 / 40.5 (+20.8%) | 9 / 8 |
 
 Tried, not worth it: the loader's GL state cache under the helper (-1.4%, noise); remapping texture units
 (`PELOAD_TEXSLOT_CENSUS`: of ~12,000 texture binds a frame only 17% rebind a slot's previous texture; the rest are real
@@ -65,8 +66,13 @@ texture changes between draws).
 The constant-buffer finding: Halo 3 maps and refills most of its cbuffers for every draw; 78% of the uploads (73% of the
 bytes) equalled that buffer's previous upload and another 20% an upload of a different buffer shortly before. The ring is
 append-only within a generation, so an unchanged buffer now points at its old copy (exact `memcmp` against the bytes it
-last uploaded; `PELOAD_D3DGL_NOCBDEDUP` = always upload). Map/unmap uploads went from 8.9 to ~3 MB a frame. Captures
-with it on and off are identical; no GL errors with `PELOAD_GL_HELPER_CHECK`.
+last uploaded), and a buffer whose bytes match one of the last ~1,000 uploads (content hash -> a 16 KB-max copy, again
+verified with `memcmp`) points at that copy. `PELOAD_D3DGL_NOCBDEDUP` = always upload, `PELOAD_D3DGL_NOCBSHARE` = own
+copy only. Map/unmap uploads went from 8.9 to ~1.2-3 MB a frame. Back-buffer captures with it on and off match (69
+pixels of 921,600 differ, idle animation); no GL errors with `PELOAD_GL_HELPER_CHECK`.
+
+Measurement trap: until `hflag` existed, `flag` also switched the helper's pixel-format cache, so the first
+constant-buffer A/B read -22.5%; on its own it is -12.8%.
 
 Before the constant-buffer change, the helper's time went to (`PELOAD_GL_HELPER_OPS`, per frame): glDrawElements 3,566 x 3.5-4.2 µs ~52%,
 glUnmapBuffer 5,200 x 0.4 µs ~8%, glDrawArrays 900 x 2 µs 7%, glBindBuffer 39,650 x 0.04 µs 6%, glClear 21 x 55-60 µs

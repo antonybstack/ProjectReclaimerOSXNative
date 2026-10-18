@@ -104,8 +104,8 @@ does (kqueue `NOTE_EXIT`). If the helper fails to start, the loader logs it and 
 - `PELOAD_GL_HELPER_SYNCERR=1` — `glGetError` in the loader becomes a real round trip (slow; debugging only).
 - `PELOAD_GL_HELPER_OPS=1` — every 5 s: the helper's decode time per frame and the top 20 GL calls (calls per frame,
   µs each, share), map/unmap upload bytes per frame by size, and the pixel-format cache's counts.
-- `PELOAD_GL_HELPER_NOPFCACHE=1` — no pixel-format cache. `PELOAD_AB=flag:<secs>` also switches it (and anything
-  else that reads `GlpShared.ab_off` / `g_ab_flag`) off in alternate phases.
+- `PELOAD_GL_HELPER_NOPFCACHE=1` — no pixel-format cache. `PELOAD_AB=hflag:<secs>` switches it (anything that reads
+  `GlpShared.ab_off`) off in alternate phases; `PELOAD_AB=flag` is the loader's switch (`g_ab_flag`).
 - `PELOAD_PRESENT_STATS=1` — window frames/s and the present thread's flush / wait / draw time (both renderers).
 
 ## Status
@@ -119,7 +119,7 @@ does (kqueue `NOTE_EXIT`). If the helper fails to start, the loader logs it and 
     thread (`PELOAD_D3DGL_SUBMIT=1`): all work.
 - 2026-10-18: 60-bot benchmark (shim/docs/bench.md), same-run A/B: the sRGB decode cache -7.4% helper CPU per frame
   (+7% fps), the pixel-format cache -10.7% (+12% fps); no GL errors with CHECK on.
-  Loader side, constant buffers refilled with unchanged bytes reuse their ring copy: -22.5% (+31% fps).
+  Loader side, constant buffers refilled with unchanged bytes reuse a ring copy: -16.8% (+21% fps).
 - Known limits:
   - F9 "visible only" reads its depth buffer back with `Map(READ)` every frame, a round trip under the helper.
   - If the helper dies mid-game the loader exits (the GL state is gone).
