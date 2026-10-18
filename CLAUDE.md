@@ -241,7 +241,8 @@ compare CPU ms/frame first, fps moves with other load on the Mac. M1 Max: 41.3 f
 Optimizing (2026-10-18, bench.md "Optimizing with it"): same-run A/B `PELOAD_AB=flag:<secs>` (g_ab_flag / GlpShared.ab_off)
 + `PELOAD_GL_HELPER_OPS=1` (helper time per GL call); `BENCH_WAIT=2` on a slow Mac. Done: sRGB decode TexParameteri only
 on change (-7.4% helper; PELOAD_D3DGL_NODECODECACHE), Metal pixel-format cache peload-gl-pf.dylib (-10.7%;
-PELOAD_GL_HELPER_NOPFCACHE; must be a dylib: dyld ignores __interpose in the main executable). Rosetta can wedge under heavy
+PELOAD_GL_HELPER_NOPFCACHE; must be a dylib: dyld ignores __interpose in the main executable), cbuffers refilled with the
+same bytes reuse their ring copy (-22.5% helper, +31% fps; cb_reuse, PELOAD_D3DGL_NOCBDEDUP; 78% of cb uploads were repeats). Rosetta can wedge under heavy
 load (new x86_64 binaries hang at exec in state U, unkillable); it cleared by itself after load dropped (else
 `sudo launchctl kickstart -k system/com.apple.oahd` / reboot).
 Test runs: `bash shim/tools/quiet-run.sh "<env>" <secs>` (one instance, visible but input-less; QR_MINIMIZE=1

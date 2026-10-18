@@ -162,10 +162,12 @@ static void hx_TexSubImage2D(const uint32_t*p,uint32_t n){ (void)n; uint32_t u; 
 static void hx_TextureSubImage2D(const uint32_t*p,uint32_t n){ (void)p;(void)n; }   // GL 4.5: not on Apple's GL; never sent
 static void hx_CompressedTexImage2D(const uint32_t*p,uint32_t n){ (void)n; uint32_t u; uint64_t b=0; const void*d=glh_data(p+6,&u,&b);
     glh_fn.CompressedTexImage2D(p[0],(GLint)p[1],p[2],(GLsizei)p[3],(GLsizei)p[4],(GLint)p[5],(GLsizei)b,d); }
+static uint64_t g_um_bytes, g_um_hist[6];   // PELOAD_GL_HELPER_OPS: bytes uploaded at unmap, uploads by size (<=256, 1K, 4K, 16K, 64K, more)
 // Unmap of a loader-side mapping: [target, off_lo, off_hi, len_lo, len_hi, access, data]
 static void hx_UnmapBuffer(const uint32_t*p,uint32_t n){ (void)n; uint32_t u; uint64_t b=0; const void*d=glh_data(p+6,&u,&b);
     GLintptr off=(GLintptr)glh_u64(p+1); GLsizeiptr len=(GLsizeiptr)glh_u64(p+3); GLbitfield acc=(p[5]&~(GLbitfield)GL_MAP_READ_BIT)|GL_MAP_WRITE_BIT;
-    if(!d||!len) return; void*m=glh_fn.MapBufferRange(p[0],off,len,acc);
+    if(!d||!len) return; { uint64_t c=b<(uint64_t)len?b:(uint64_t)len; g_um_bytes+=c; g_um_hist[c<=256?0:c<=1024?1:c<=4096?2:c<=16384?3:c<=65536?4:5]++; }
+    void*m=glh_fn.MapBufferRange(p[0],off,len,acc);
     if(m){ memcpy(m,d,(size_t)(b<(uint64_t)len?b:(uint64_t)len)); glh_fn.UnmapBuffer(p[0]); } else glh_fn.BufferSubData(p[0],off,len,d); }
 // round trips: p[0] = seq
 static void hx_MapBufferRange(const uint32_t*p,uint32_t n){ (void)n; GLsizeiptr len=(GLsizeiptr)glh_u64(p+4); if(len>(GLsizeiptr)GLP_REPLY_BYTES) len=GLP_REPLY_BYTES;
@@ -225,7 +227,9 @@ static void ops_report(void){ double now=mono(); if(!g_op_tb){ g_op_tb=now; retu
     for(int r=0;r<20;r++){ int bi=-1; uint64_t bt=0; for(int i=0;i<256;i++) if(g_op_t[i]>bt){ bt=g_op_t[i]; bi=i; } if(bi<0) break;
         const char*nm=bi>=GLOP_FIRST_GL&&bi-GLOP_FIRST_GL<(int)(sizeof glop_names/sizeof glop_names[0])?glop_names[bi-GLOP_FIRST_GL]:bi==GLOP_PQ_PUBLISH?"pq_publish":bi==GLOP_STAGE?"stage":"?";
         k+=snprintf(m+k,sizeof m-k," %s %.0f/f %.2fus %.0f%%,",nm,(double)g_op_n[bi]/fr,g_op_n[bi]?bt*1e-3*tb.numer/tb.denom/(double)g_op_n[bi]:0,100.0*bt/(double)(tot?tot:1));
-        g_op_t[bi]=0; if(k>(int)sizeof m-120) break; }
+        g_op_t[bi]=0; if(k>(int)sizeof m-360) break; }
+    k+=snprintf(m+k,sizeof m-k," unmap uploads %.2f MB/frame by size <=256 %.0f, 1K %.0f, 4K %.0f, 16K %.0f, 64K %.0f, more %.0f;",g_um_bytes/1048576.0/fr,
+        (double)g_um_hist[0]/fr,(double)g_um_hist[1]/fr,(double)g_um_hist[2]/fr,(double)g_um_hist[3]/fr,(double)g_um_hist[4]/fr,(double)g_um_hist[5]/fr); g_um_bytes=0; memset(g_um_hist,0,sizeof g_um_hist);
     k+=snprintf(m+k,sizeof m-k," format queries cached %llu, asked %llu%s",&glhpf_hits?(unsigned long long)glhpf_hits:0,&glhpf_miss?(unsigned long long)glhpf_miss:0,&glhpf_on?"":" (no peload-gl-pf.dylib)");
     memset(g_op_n,0,sizeof g_op_n); memset(g_op_t,0,sizeof g_op_t); m[k++]='\n'; (void)!write(2,m,(size_t)k); g_op_tb=now; }
 

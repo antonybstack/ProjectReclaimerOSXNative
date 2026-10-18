@@ -56,12 +56,19 @@ goes, per GL call.
 |---|---|---|---|
 | sRGB decode set only when it changes (loader) | 27.4 / 29.2 (-7.4%) | +7.1% | 9 / 8 |
 | Metal pixel-format cache (`peload-gl-pf.dylib`) | 24.2 / 27.3 (-10.7%) | 39.0 / 34.0 (+12.2%) | 8 / 9 |
+| constant buffers refilled with the same bytes reuse their ring copy (loader, `cb_reuse`) | 18.9 / 24.4 (-22.5%) | 54.4 / 41.6 (+30.8%) | 9 / 8 |
 
 Tried, not worth it: the loader's GL state cache under the helper (-1.4%, noise); remapping texture units
 (`PELOAD_TEXSLOT_CENSUS`: of ~12,000 texture binds a frame only 17% rebind a slot's previous texture; the rest are real
 texture changes between draws).
 
-Where the helper's time goes now (`PELOAD_GL_HELPER_OPS`, per frame): glDrawElements 3,566 x 3.5-4.2 µs ~52%,
+The constant-buffer finding: Halo 3 maps and refills most of its cbuffers for every draw; 78% of the uploads (73% of the
+bytes) equalled that buffer's previous upload and another 20% an upload of a different buffer shortly before. The ring is
+append-only within a generation, so an unchanged buffer now points at its old copy (exact `memcmp` against the bytes it
+last uploaded; `PELOAD_D3DGL_NOCBDEDUP` = always upload). Map/unmap uploads went from 8.9 to ~3 MB a frame. Captures
+with it on and off are identical; no GL errors with `PELOAD_GL_HELPER_CHECK`.
+
+Before the constant-buffer change, the helper's time went to (`PELOAD_GL_HELPER_OPS`, per frame): glDrawElements 3,566 x 3.5-4.2 µs ~52%,
 glUnmapBuffer 5,200 x 0.4 µs ~8%, glDrawArrays 900 x 2 µs 7%, glBindBuffer 39,650 x 0.04 µs 6%, glClear 21 x 55-60 µs
 (render-pass ends) 5%, glBindBufferRange 19,800 4%, glBlitFramebuffer 3 x 240-310 µs 3%.
 
