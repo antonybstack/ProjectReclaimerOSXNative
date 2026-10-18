@@ -182,8 +182,8 @@ breakdown, callers of memmove/memcpy, generated-code pools named), PELOAD_GLCOUN
 [submit] line (GL-thread waits for work/compute/GL lock, compute input bytes), PELOAD_CALLCOUNT=<thread name> (Win32 calls
 per thread), PELOAD_TRACE_WOA=<thread>. tools/glbench.sh: Apple's GL driver is ~1.5x faster native than under Rosetta --
 the native GL helper (PERF-PLAN option 1) is the next big step for BTB-sized games, where the GL thread (~6.3 us/draw)
-is the limit; the GPU is 15-27% busy. Not worth it (A/B neutral): the GL state cache (PELOAD_D3DGL_GLCACHE=1, 31 -> 18
-calls/draw), batched CB maps. mach_absolute_time is NANOSECONDS under Rosetta (timebase 1/1): convert with mt_us().
+is the limit; the GPU is 15-27% busy. Not worth it in process (A/B neutral): batched CB maps. The GL state cache (31 -> 18 calls/draw) is on by default since
+2026-10-18 (-3% helper CPU; PELOAD_D3DGL_GLCACHE=0 = off). mach_absolute_time is NANOSECONDS under Rosetta (timebase 1/1): convert with mt_us().
 Busy-poll damper: the client's mcc-voice thread (no mic) polls GetAsyncKeyState ~500k/s; PELOAD_POLL_DAMP=1 (OPT-IN: the
 key poll holds a lock the main thread also takes -- sleeping there made sticks sluggish and movement choppy).
 Big guest memcpy/memset (>= 2 KB) run on the host's (PELOAD_GUEST_MEMCPY=1 = old). Trace stubs (PELOAD_TRACE_ALL,

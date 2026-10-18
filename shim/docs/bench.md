@@ -38,6 +38,7 @@ quiet).
 |---|---|---|---|---|
 | GL helper (default) | 41.3 | 36.6 | 5,084 | 17.2 / 74.6 / 24.6 |
 | `PELOAD_GL_HELPER=0` | 14.9 | 14.1 | 5,011 | 66.2 / 213.2 / - |
+| GL helper, 2026-10-18 (pf cache, sRGB decode, cbuffer dedupe, GL state cache; load average ~14) | 57.5 | 53.3 | 5,079 | 16.6 / 60.3 / 17.9 |
 
 The helper is 100% busy: in this scene the frame rate is set by the helper's GL work, ~4.8 us of native driver time
 per draw. The loader's side (D3D -> GL translation and encoding) is 17.2 ms, ~3.4 us per draw. Next steps that this
@@ -50,7 +51,7 @@ Measure a change with `PELOAD_AB=flag:<secs>` inside one run: d3dsubmit.c flips 
 it; `hflag` flips the helper's `GlpShared.ab_off` instead) every `<secs>` and logs `[ab]` lines with fps, draws and the helper's CPU ms per frame for
 each phase (the first phase is a warm-up and is not counted). On a busy Mac this is the only reliable comparison;
 `BENCH_WAIT=2` doubles the menu waits when the machine is slow. `PELOAD_GL_HELPER_OPS=1` shows where the helper's time
-goes, per GL call.
+goes, per GL call, and how many framebuffer passes a frame has (it times every command: ~15% overhead of its own).
 
 | change | helper CPU ms/frame (on / off) | fps (on / off) | phases |
 |---|---|---|---|
@@ -58,8 +59,10 @@ goes, per GL call.
 | Metal pixel-format cache (`peload-gl-pf.dylib`) | 24.2 / 27.3 (-10.7%) | 39.0 / 34.0 (+12.2%) | 8 / 9 |
 | constant buffers refilled with the same bytes reuse their own last ring copy (loader, `cb_reuse`) | 19.2 / 22.3 (-12.8%) | 51.8 / 44.5 (+15.7%) | 9 / 8 |
 | ... and identical copies of other recent uploads (`g_cbshare`) | 19.8 / 23.8 (-16.8% for both) | 48.5 / 40.5 (+20.8%) | 9 / 8 |
+| GL state cache on by default (`PELOAD_AB=glcache`) | 18.9 / 19.3 (-3.0% median) | 52.1 / 49.5 (+3.2%) | 9 / 8 |
 
-Tried, not worth it: the loader's GL state cache under the helper (-1.4%, noise); remapping texture units
+Tried, not worth it: the GL state cache before the constant-buffer change (-1.4%, noise); polling occlusion queries only
+after a publish (they force a command-buffer submit when their commands are not submitted yet; -0.1%); remapping texture units
 (`PELOAD_TEXSLOT_CENSUS`: of ~12,000 texture binds a frame only 17% rebind a slot's previous texture; the rest are real
 texture changes between draws).
 

@@ -4094,8 +4094,9 @@ static void gl_count_report(void){
 // The GL thread makes ~31 GL calls per draw in big games (PELOAD_GLCOUNT), each ~0.2-0.3 us in Apple's driver under
 // Rosetta; many re-bind the bound buffer / VAO / program or re-set identical stencil, enable and blend state. One shadow
 // per CGL context (the present thread has its own); nothing in the loader deletes buffers, VAOs or programs, so cached
-// names can't go stale. Opt-in (PELOAD_D3DGL_GLCACHE=1): in a 57-player game the 40% fewer calls gave no measurable fps --
-// Apple's driver already returns early on redundant binds; the cost is in real state changes, draws and copies.
+// names can't go stale. On by default since 2026-10-18 (PELOAD_D3DGL_GLCACHE=0 = off): in process the 40% fewer calls gave no
+// measurable fps (the loader's own translation dominated); with the GL helper, after the constant-buffer dedupe, it is -3%
+// helper CPU per frame in the 60-bot benchmark.
 typedef struct { unsigned buf, type; int size, stride; unsigned char norm, isint, ok; const void* ptr; } GlcAttr;
 typedef struct {
     void* ctx;
@@ -4178,7 +4179,7 @@ static void glc_BlendEquationSeparatei(unsigned i,unsigned a,unsigned b){ if(!g_
     GR.BlendEquationSeparatei(i,a,b); if(i<8){ s->rt[i].be[0]=a; s->rt[i].be[1]=b; s->rt[i].beok=1; } }
 static void glc_BlendEquationSeparate(unsigned a,unsigned b){ GlShadow*s=gls(); GR.BlendEquationSeparate(a,b); for(int i=0;i<8;i++){ s->rt[i].be[0]=a; s->rt[i].be[1]=b; s->rt[i].beok=1; } }
 #define GLC_WRAP(n) do{ if(G.n){ GR.n=(void*)G.n; G.n=(void*)glc_##n; } }while(0)
-static void glc_install(void){ if(!getenv("PELOAD_D3DGL_GLCACHE")) return;   // opt-in: cut GL calls 31 -> 18 a draw, no measurable fps change
+static void glc_install(void){ const char*e=getenv("PELOAD_D3DGL_GLCACHE"); if(e && *e=='0') return;   // cuts GL calls 31 -> 18 a draw
     if(!G.BindBuffer||!G.BindVertexArray||!G.Enable||!G.Disable) return;
     GLC_WRAP(BindBuffer); GLC_WRAP(BindBufferRange); GLC_WRAP(BindVertexArray); GLC_WRAP(VertexAttribPointer); GLC_WRAP(VertexAttribIPointer);
     GLC_WRAP(StencilFuncSeparate); GLC_WRAP(StencilOpSeparate); GLC_WRAP(StencilMask); GLC_WRAP(Enable); GLC_WRAP(Disable);

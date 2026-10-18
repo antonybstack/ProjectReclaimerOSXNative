@@ -220,6 +220,12 @@ static void decode(uint32_t op,const uint32_t*p,uint32_t n){
 // PELOAD_GL_HELPER_OPS=1: every 5 s the opcodes that took the most time (count per frame, us each, share of the time
 // spent decoding). Draws carry the driver's deferred state validation, so the state calls that cause it look cheap.
 static uint64_t g_op_n[256], g_op_t[256]; static double g_op_tb;
+// render passes (a draw-framebuffer change ends one in Apple's driver): with draws / with only clears / empty
+static uint64_t g_pass_draw, g_pass_clear, g_pass_empty; static uint32_t g_pass_fbo=~0u; static int g_pass_d, g_pass_c;
+static void pass_note(uint32_t op,const uint32_t*p){
+    if(op==GLOP_BindFramebuffer){ if((p[0]==0x8D40||p[0]==0x8CA9) && p[1]!=g_pass_fbo){ if(g_pass_d) g_pass_draw++; else if(g_pass_c) g_pass_clear++; else g_pass_empty++; g_pass_fbo=p[1]; g_pass_d=g_pass_c=0; } }
+    else if(op==GLOP_Clear) g_pass_c=1;
+    else if(op==GLOP_DrawArrays||op==GLOP_DrawArraysInstanced||op==GLOP_DrawElements||op==GLOP_DrawElementsBaseVertex||op==GLOP_DrawElementsInstanced||op==GLOP_DrawElementsInstancedBaseVertex) g_pass_d=1; }
 static void ops_report(void){ double now=mono(); if(!g_op_tb){ g_op_tb=now; return; } if(now-g_op_tb<5.0) return;
     static uint64_t pub0; uint64_t fr=S->published-pub0; pub0=S->published; if(!fr) fr=1;
     mach_timebase_info_data_t tb; mach_timebase_info(&tb); uint64_t tot=0; for(int i=0;i<256;i++) tot+=g_op_t[i];
@@ -228,6 +234,7 @@ static void ops_report(void){ double now=mono(); if(!g_op_tb){ g_op_tb=now; retu
         const char*nm=bi>=GLOP_FIRST_GL&&bi-GLOP_FIRST_GL<(int)(sizeof glop_names/sizeof glop_names[0])?glop_names[bi-GLOP_FIRST_GL]:bi==GLOP_PQ_PUBLISH?"pq_publish":bi==GLOP_STAGE?"stage":"?";
         k+=snprintf(m+k,sizeof m-k," %s %.0f/f %.2fus %.0f%%,",nm,(double)g_op_n[bi]/fr,g_op_n[bi]?bt*1e-3*tb.numer/tb.denom/(double)g_op_n[bi]:0,100.0*bt/(double)(tot?tot:1));
         g_op_t[bi]=0; if(k>(int)sizeof m-360) break; }
+    k+=snprintf(m+k,sizeof m-k," framebuffer passes/frame: with draws %.1f, only clears %.1f, empty %.1f;",(double)g_pass_draw/fr,(double)g_pass_clear/fr,(double)g_pass_empty/fr); g_pass_draw=g_pass_clear=g_pass_empty=0;
     k+=snprintf(m+k,sizeof m-k," unmap uploads %.2f MB/frame by size <=256 %.0f, 1K %.0f, 4K %.0f, 16K %.0f, 64K %.0f, more %.0f;",g_um_bytes/1048576.0/fr,
         (double)g_um_hist[0]/fr,(double)g_um_hist[1]/fr,(double)g_um_hist[2]/fr,(double)g_um_hist[3]/fr,(double)g_um_hist[4]/fr,(double)g_um_hist[5]/fr); g_um_bytes=0; memset(g_um_hist,0,sizeof g_um_hist);
     k+=snprintf(m+k,sizeof m-k," format queries cached %llu, asked %llu%s",&glhpf_hits?(unsigned long long)glhpf_hits:0,&glhpf_miss?(unsigned long long)glhpf_miss:0,&glhpf_on?"":" (no peload-gl-pf.dylib)");
@@ -265,7 +272,7 @@ int main(int argc,char**argv){
         while(tail!=head){
             uint64_t pos=tail%GLP_RING_WORDS; uint32_t h=S->ring[pos], op=GLCMD_OP(h), nw=GLCMD_NW(h);
             if(op==GLOP_WRAP){ tail+=GLP_RING_WORDS-pos; continue; }
-            if(__builtin_expect(opstats,0)){ uint64_t t0=mach_absolute_time(); decode(op,&S->ring[pos+1],nw); g_op_t[op&255]+=mach_absolute_time()-t0; g_op_n[op&255]++; if(op==GLOP_PQ_PUBLISH) ops_report(); }
+            if(__builtin_expect(opstats,0)){ uint64_t t0=mach_absolute_time(); decode(op,&S->ring[pos+1],nw); g_op_t[op&255]+=mach_absolute_time()-t0; g_op_n[op&255]++; pass_note(op,&S->ring[pos+1]); if(op==GLOP_PQ_PUBLISH) ops_report(); }
             else decode(op,&S->ring[pos+1],nw);
             tail+=1+nw; S->cmds++;
             if((S->cmds&255)==0){ __atomic_store_n(&S->tail,tail,__ATOMIC_RELEASE); if(g_npq) poll_queries(); }
