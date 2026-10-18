@@ -10,7 +10,7 @@ VER="${1:?client version, e.g. 0.9.18}"; SUF="${2:-}"
 NAME="ProjectReclaimerOSXNative-reclaimer-$VER${SUF:+-$SUF}-macos"
 bash shim/build.sh >/dev/null
 rm -rf "dist/$NAME"; mkdir -p "dist/$NAME/shim/build" "dist/$NAME/shim/crt" "dist/$NAME/shim/tools" "dist/$NAME/client"
-cp shim/build/peload shim/build/peload-gl "dist/$NAME/shim/build/"; cp shim/crt/*.dll "dist/$NAME/shim/crt/"
+cp shim/build/peload shim/build/peload-gl shim/build/peload-gl-pf.dylib "dist/$NAME/shim/build/"; cp shim/crt/*.dll "dist/$NAME/shim/crt/"
 cp shim/play.sh shim/target.sh shim/dedicated.sh shim/build.sh "dist/$NAME/shim/"
 mkdir -p "dist/$NAME/shim/docs"; cp shim/docs/mods.md shim/docs/game-options.md "dist/$NAME/shim/docs/"
 mkdir -p "dist/$NAME/re-tools"; cp re-tools/h3map.py re-tools/h3bsp.py re-tools/h3bounds.py "dist/$NAME/re-tools/"   # h3bounds: the safe zones the map pictures cover

@@ -44,6 +44,27 @@ per draw. The loader's side (D3D -> GL translation and encoding) is 17.2 ms, ~3.
 loop can measure: drop redundant GL state calls before they are encoded (the state cache was A/B neutral in process,
 where the loader's own translation dominated; with the helper the driver work is the limit), fewer GL calls per draw.
 
+## Optimizing with it (2026-10-18)
+
+Measure a change with `PELOAD_AB=flag:<secs>` inside one run: d3dsubmit.c flips `g_ab_flag` (loader) and
+`GlpShared.ab_off` (helper) every `<secs>` and logs `[ab]` lines with fps, draws and the helper's CPU ms per frame for
+each phase (the first phase is a warm-up and is not counted). On a busy Mac this is the only reliable comparison;
+`BENCH_WAIT=2` doubles the menu waits when the machine is slow. `PELOAD_GL_HELPER_OPS=1` shows where the helper's time
+goes, per GL call.
+
+| change | helper CPU ms/frame (on / off) | fps (on / off) | phases |
+|---|---|---|---|
+| sRGB decode set only when it changes (loader) | 27.4 / 29.2 (-7.4%) | +7.1% | 9 / 8 |
+| Metal pixel-format cache (`peload-gl-pf.dylib`) | 24.2 / 27.3 (-10.7%) | 39.0 / 34.0 (+12.2%) | 8 / 9 |
+
+Tried, not worth it: the loader's GL state cache under the helper (-1.4%, noise); remapping texture units
+(`PELOAD_TEXSLOT_CENSUS`: of ~12,000 texture binds a frame only 17% rebind a slot's previous texture; the rest are real
+texture changes between draws).
+
+Where the helper's time goes now (`PELOAD_GL_HELPER_OPS`, per frame): glDrawElements 3,566 x 3.5-4.2 µs ~52%,
+glUnmapBuffer 5,200 x 0.4 µs ~8%, glDrawArrays 900 x 2 µs 7%, glBindBuffer 39,650 x 0.04 µs 6%, glClear 21 x 55-60 µs
+(render-pass ends) 5%, glBindBufferRange 19,800 4%, glBlitFramebuffer 3 x 240-310 µs 3%.
+
 For reference, real games: 60-player BTB ~2,000-3,000 draws/frame in view, 100-player Infection ~3,000 (PERF-PLAN.md).
 This view (60 armed Spartans in the open) is heavier than an average BTB frame, closer to a big fight.
 

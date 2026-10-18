@@ -183,18 +183,21 @@ static void sub_switch(void){   // game thread, at a Present
     static double ab_s=-1, t0; static unsigned long f0, d0; static double sum[2]; static unsigned long fr[2], dr[2]; static int nph[2];
     // PELOAD_AB=<feature>:<secs> (or PELOAD_D3DGL_SUBMIT_AB=<secs> = submit): flip a feature every <secs> in one game and
     // log each phase's fps and draws/frame. Features: submit (this thread), memcpy (big guest copies on the host).
-    static int feat; extern uint64_t g_memcpy_min; static uint64_t mc_on;
+    // flag = g_ab_flag, the switch of whatever change is being measured (the code under test reads it). With the GL helper
+    // each phase also logs the helper's CPU ms per frame (steadier than fps on a busy Mac).
+    static int feat; extern uint64_t g_memcpy_min; static uint64_t mc_on, h0; static double hms[2];
     if(ab_s<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_AB"); ab_s=e?atof(e):0; feat=0;
-        const char*a=getenv("PELOAD_AB"); if(a){ const char*c=strchr(a,':'); ab_s=c?atof(c+1):20; feat=!strncmp(a,"memcpy",6)?1:!strncmp(a,"glcache",7)?2:!strncmp(a,"cbbatch",7)?3:0; if(!ab_s) ab_s=20; }
-        mc_on=g_memcpy_min; t0=mono_s(); f0=g_ct_frame; d0=g_sub_ndraw; }
+        const char*a=getenv("PELOAD_AB"); if(a){ const char*c=strchr(a,':'); ab_s=c?atof(c+1):20; feat=!strncmp(a,"memcpy",6)?1:!strncmp(a,"glcache",7)?2:!strncmp(a,"cbbatch",7)?3:!strncmp(a,"flag",4)?4:0; if(!ab_s) ab_s=20; }
+        mc_on=g_memcpy_min; t0=mono_s(); f0=g_ct_frame; d0=g_sub_ndraw; h0=g_glp?g_glp->cpu_ns:0; }
     if(ab_s>0){ double now=mono_s(); if(now-t0>=ab_s && g_sub_want<0){
             extern volatile int g_glc_on; extern volatile unsigned g_glc_gen; extern volatile int g_cbbatch_on;
-            int ph=feat==1?(g_memcpy_min!=~0ull):feat==2?g_glc_on:feat==3?(g_cbbatch_on!=0):sub_on(); unsigned long fn=g_ct_frame-f0, dn=g_sub_ndraw-d0; double dt=now-t0;
-            sum[ph]+=dt; fr[ph]+=fn; dr[ph]+=dn; nph[ph]++;
-            char m[300]; int k=snprintf(m,sizeof m,"  [ab] %s %s: %.1f fps, %lu draws/frame (%.0f s) | totals: on %.1f fps (%d), off %.1f fps (%d)\n",
-                feat==1?"memcpy":feat==2?"glcache":feat==3?"cbbatch":"submit",ph?"on ":"off",fn/dt,fn?dn/fn:0,dt,sum[1]>0?fr[1]/sum[1]:0,nph[1],sum[0]>0?fr[0]/sum[0]:0,nph[0]); (void)!write(2,m,k);
-            if(feat==1) g_memcpy_min=ph?~0ull:mc_on; else if(feat==2){ if(!ph) g_glc_gen++; g_glc_on=!ph; } else if(feat==3) g_cbbatch_on=!ph; else g_sub_want=!ph;
-            t0=now; f0=g_ct_frame; d0=g_sub_ndraw; } }
+            int ph=feat==1?(g_memcpy_min!=~0ull):feat==2?g_glc_on:feat==3?(g_cbbatch_on!=0):feat==4?(g_ab_flag!=0):sub_on(); unsigned long fn=g_ct_frame-f0, dn=g_sub_ndraw-d0; double dt=now-t0;
+            uint64_t h1=g_glp?g_glp->cpu_ns:0; double hm=(h1>h0)?(h1-h0)*1e-6:0; if(nph[ph]||nph[!ph]) { sum[ph]+=dt; fr[ph]+=fn; dr[ph]+=dn; hms[ph]+=hm; nph[ph]++; }   // the first phase warms up: not counted
+            char m[400]; int k=snprintf(m,sizeof m,"  [ab] %s %s: %.1f fps, %lu draws/frame, helper %.2f ms/frame (%.0f s) | totals: on %.1f fps %.2f ms (%d), off %.1f fps %.2f ms (%d)\n",
+                feat==1?"memcpy":feat==2?"glcache":feat==3?"cbbatch":feat==4?"flag":"submit",ph?"on ":"off",fn/dt,fn?dn/fn:0,fn?hm/fn:0,dt,
+                sum[1]>0?fr[1]/sum[1]:0,fr[1]?hms[1]/fr[1]:0,nph[1],sum[0]>0?fr[0]/sum[0]:0,fr[0]?hms[0]/fr[0]:0,nph[0]); (void)!write(2,m,k);
+            if(feat==1) g_memcpy_min=ph?~0ull:mc_on; else if(feat==2){ if(!ph) g_glc_gen++; g_glc_on=!ph; } else if(feat==3) g_cbbatch_on=!ph; else if(feat==4){ g_ab_flag=!ph; if(g_glp) g_glp->ab_off=(uint64_t)ph; } else g_sub_want=!ph;
+            t0=now; f0=g_ct_frame; d0=g_sub_ndraw; h0=h1; } }
     if(g_sub_auto>0 && g_sub_want<0){ static double ta; double now=mono_s(); if(now-ta>=5.0){ ta=now; extern int st_player_count(void);
             static int min=-1; if(min<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_AUTO_MIN"); min=e?atoi(e):40; }
             int n=st_player_count(), want=n>=min; if(want!=sub_on()){ g_sub_want=want;

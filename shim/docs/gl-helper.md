@@ -77,6 +77,21 @@ does (kqueue `NOTE_EXIT`). If the helper fails to start, the loader logs it and 
 - `shim/src/glproxy.c` — loader side (included into peload.c): spawn, ring, round trips, maps, queries,
   name allocation, present slots.
 - `shim/src/glhelper.c` — the helper process (arm64).
+- `shim/src/glhelper_pf.c` → `shim/build/peload-gl-pf.dylib` — caches Apple's driver's Metal pixel-format queries
+  (below). `peload-gl` links it weakly: the helper runs without it, just slower.
+
+## Driver costs worked around
+
+- **Pixel-format queries.** Whenever texture or sampler state is dirty, Apple's driver (`AppleMetalOpenGLRenderer`,
+  `GLDContextRec::updateTextureState`) checks every sampler of the bound program with `GLDTextureRec::isValidTexture`,
+  which calls `MTLPixelFormatGetInfoForDevice` each time (~0.12 µs, Objective-C `supportsFamily:` calls inside; 12% of
+  the helper's time with 60 bots). The answer is fixed per device and format, so `peload-gl-pf.dylib` interposes the
+  function (`__DATA,__interpose`) and caches it for the helper's GL thread (13 formats in a 60-bot game, 40 M lookups
+  in 100 s). dyld ignores interpose tuples in the main executable; in a dylib loaded at launch they apply to the
+  driver bundle, which is not in the shared cache. `PELOAD_GL_HELPER_NOPFCACHE=1` turns it off.
+- **sRGB decode re-sent** (loader side, `d3dgl_bind_res`): textures sampled without a sampler object had
+  `TEXTURE_SRGB_DECODE` set at every bind (~1,600 a frame); each `TexParameteri` makes the driver re-validate the
+  texture at the next draw. It is now sent only when it changes (`PELOAD_D3DGL_NODECODECACHE` = always).
 
 ## Switches
 
@@ -87,6 +102,10 @@ does (kqueue `NOTE_EXIT`). If the helper fails to start, the loader logs it and 
   at publish, GL errors.
 - `PELOAD_GL_HELPER_CHECK=1` — the helper calls `glGetError` after every command and logs errors with the function.
 - `PELOAD_GL_HELPER_SYNCERR=1` — `glGetError` in the loader becomes a real round trip (slow; debugging only).
+- `PELOAD_GL_HELPER_OPS=1` — every 5 s: the helper's decode time per frame and the top 20 GL calls (calls per frame,
+  µs each, share), plus the pixel-format cache's counts.
+- `PELOAD_GL_HELPER_NOPFCACHE=1` — no pixel-format cache. `PELOAD_AB=flag:<secs>` also switches it (and anything
+  else that reads `GlpShared.ab_off` / `g_ab_flag`) off in alternate phases.
 - `PELOAD_PRESENT_STATS=1` — window frames/s and the present thread's flush / wait / draw time (both renderers).
 
 ## Status
@@ -98,6 +117,8 @@ does (kqueue `NOTE_EXIT`). If the helper fails to start, the loader logs it and 
   - Reclaimer's menu (its UI composited into the frame), Host Game -> match, Settings resolution change
     (ResizeBuffers -> new back buffer and present slots), F8 capture (ReadPixels round trip), the GL submission
     thread (`PELOAD_D3DGL_SUBMIT=1`): all work.
+- 2026-10-18: 60-bot benchmark (shim/docs/bench.md), same-run A/B: the sRGB decode cache -7.4% helper CPU per frame
+  (+7% fps), the pixel-format cache -10.7% (+12% fps); no GL errors with CHECK on.
 - Known limits:
   - F9 "visible only" reads its depth buffer back with `Map(READ)` every frame, a round trip under the helper.
   - If the helper dies mid-game the loader exits (the GL state is gone).

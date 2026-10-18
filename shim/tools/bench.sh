@@ -6,7 +6,7 @@
 #        bash shim/tools/bench.sh 60 2 "PELOAD_GL_HELPER=0"          # A/B: GL in process
 # Results: one JSON line per run appended to /tmp/reclaimer_bench.jsonl (BENCH_OUT=...), log /tmp/reclaimer_bench.log.
 # BENCH_MAP=<name> (default guardian = Host Game's default) picks the map through the map picker's search box, e.g.
-# valhalla, sandtrap, avalanche, "high ground". BENCH_SECS (default 30) measured seconds. Never runs beside the user's game (same rule as quiet-run.sh).
+# valhalla, sandtrap, avalanche, "high ground". BENCH_SECS (default 30) measured seconds; BENCH_WAIT=2 doubles the menu waits. Never runs beside the user's game (same rule as quiet-run.sh).
 # Needs the client exe and the MS CRT: from this tree, else from ~/ReclaimerMac (BENCH_EXE / RECLAIMER_CRT_DIR override).
 cd "$(dirname "$0")/../.."
 BOTS="${1:-60}"; RUNS="${2:-1}"; EXTRA="${3:-}"
@@ -17,9 +17,11 @@ CRT="${RECLAIMER_CRT_DIR:-}"; [ -z "$CRT" ] && { [ -f shim/crt/ucrtbase.dll ] &&
 KEEP=" $(cat "$HOME/Library/Application Support/ReclaimerMac/target.pgid" "$HOME/Library/Application Support/ReclaimerMac/dedicated.pgid" 2>/dev/null | tr '\n' ' ') "
 others(){ for p in $(pgrep -f '^[^ ]*build/peload'); do case "$KEEP" in *" $(ps -o pgid= -p "$p" | tr -d ' ') "*) continue;; esac; echo "$p"; done; }
 mkdir -p "$HOME/Library/Application Support/ReclaimerMac/prefix/drive_c/ReclaimerProfileTest"
-MAP="${BENCH_MAP:-guardian}"; CLICKS="110,503;s:6"   # Host Game
+MAP="${BENCH_MAP:-guardian}"; W="${BENCH_WAIT:-1}"   # BENCH_WAIT=2: every menu wait twice as long (a busy Mac)
+w(){ echo "s:$(( $1 * W ))"; }
+CLICKS="110,503;$(w 6)"   # Host Game
 # map picker (1280x720 coordinates): MAP row, search box, type, first tile, USE <MAP>
-[ "$MAP" != guardian ] && CLICKS="$CLICKS;230,185;s:3;300,145;t:$MAP;s:4;155,265;s:3;1047,665;s:4"
+[ "$MAP" != guardian ] && CLICKS="$CLICKS;230,185;$(w 3);300,145;t:$MAP;$(w 4);155,265;$(w 3);1047,665;$(w 4)"
 CLICKS="$CLICKS;230,625"   # Start Game
 for run in $(seq 1 "$RUNS"); do
   if [ -n "$(others)" ]; then echo "a game is already running - not starting"; exit 3; fi
@@ -32,7 +34,7 @@ for run in $(seq 1 "$RUNS"); do
     PELOAD_AUTOCLICK="$CLICKS" PELOAD_BENCH_BOTS="$BOTS" PELOAD_BENCH_SECS="${BENCH_SECS:-30}" PELOAD_BENCH_OUT="$OUT" $EXTRA \
     arch -x86_64 shim/build/peload "$EXE" game-client --mcc-path "C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection" \
     < /dev/null > "$LOG" 2>&1 &
-  PG=$!; set +m; t=0; limit=$(( ${BENCH_SECS:-30} + 170 ))
+  PG=$!; set +m; t=0; limit=$(( ${BENCH_SECS:-30} + 170 * W ))
   while [ $t -lt $limit ]; do
     sleep 2; t=$((t+2))
     if grep -q '\[bench\] RESULT\|\[bench\] .*no bots\|\[CRASH\]' "$LOG" 2>/dev/null; then break; fi

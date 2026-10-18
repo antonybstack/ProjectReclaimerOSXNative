@@ -33,7 +33,7 @@ echo "space needed ~$((NEED/1048576)) GB, available ~$((HAVE/1048576)) GB on $(d
 
 R="rsync -a --exclude=.DS_Store"
 echo "== loader and scripts"
-$R shim/build/peload "$OUT/app/shim/build/"; [ -x shim/build/peload-gl ] && $R shim/build/peload-gl "$OUT/app/shim/build/"; $R shim/crt/ "$OUT/app/shim/crt/"
+$R shim/build/peload "$OUT/app/shim/build/"; [ -x shim/build/peload-gl ] && $R shim/build/peload-gl "$OUT/app/shim/build/"; [ -f shim/build/peload-gl-pf.dylib ] && $R shim/build/peload-gl-pf.dylib "$OUT/app/shim/build/"; $R shim/crt/ "$OUT/app/shim/crt/"
 $R shim/play.sh shim/target.sh shim/dedicated.sh shim/build.sh "$OUT/app/shim/"; $R shim/tools/quiet-run.sh shim/tools/servers.sh shim/tools/maptop.sh "$OUT/app/shim/tools/"
 mkdir -p "$OUT/app/re-tools"; $R re-tools/h3map.py re-tools/h3bsp.py "$OUT/app/re-tools/"
 mkdir -p "$OUT/app/shim/docs"; $R shim/docs/mods.md shim/docs/game-options.md "$OUT/app/shim/docs/"

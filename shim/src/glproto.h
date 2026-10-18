@@ -49,7 +49,9 @@ typedef struct {
     // present slots: the helper fills a slot, then publishes it as latest (pq_seq++), and writes the present pipe;
     // the loader's present thread marks the slot it is drawing in pq_reading
     volatile uint32_t slot_surface[GLP_SLOTS], slot_w[GLP_SLOTS], slot_h[GLP_SLOTS]; volatile uint64_t slot_frame[GLP_SLOTS];
-    volatile int32_t pq_latest, pq_reading; volatile uint64_t pq_seq; uint64_t pad4[6];
+    volatile int32_t pq_latest, pq_reading; volatile uint64_t pq_seq;
+    volatile uint64_t ab_off;   // PELOAD_AB=flag: 1 while the change being measured is off (helper-side changes read it)
+    uint64_t pad4[5];
     // statistics (helper)
     volatile uint64_t cmds, gl_errors; volatile double busy_s, idle_s; volatile uint64_t published, fence_waits; volatile double fence_wait_s;
     volatile uint64_t cpu_ns;   // the helper process's CPU time (updated at every publish; 0 = an older helper)

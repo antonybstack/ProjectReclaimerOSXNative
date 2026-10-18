@@ -960,6 +960,7 @@ typedef struct { void** vtbl; uint32_t kind; uint32_t rowpitch; uint64_t size; v
     unsigned glsamp, glsamp_nomip; // sampler state: GL sampler objects (full / no-mip variant)
     unsigned glsamp_skip, glsamp_nomip_skip; // ... with sRGB decode SKIPPED (UNORM view of sRGB-stored texture)
     int glsrgb;                   // texture: GL storage is SRGB8_ALPHA8 (decode per view; write-encode per RTV)
+    unsigned gldecode_tex; int gldecode;   // texture: the TEXTURE_SRGB_DECODE last set on gltex (sampler-less binds; 1 decode, 2 skip)
     int glhasmips;                // texture: a real GL mip chain was uploaded/generated
     uint32_t mips, arr, depth, misc, bindf; // texture desc: MipLevels (resolved), ArraySize, Depth (3D), MiscFlags, BindFlags
     unsigned gltarget;            // texture: GL target of gltex (2D / 2D_ARRAY / CUBE_MAP / CUBE_MAP_ARRAY / 3D)
@@ -4108,6 +4109,7 @@ typedef struct {
     struct { unsigned char cm[4], blend, cmok, bfok, beok, blendok; unsigned bf[4], be[2]; } rt[8];
     unsigned gen;
 } GlShadow;
+volatile int g_ab_flag=1;   // PELOAD_AB=flag:<secs> flips it: the switch of the change being measured (d3dsubmit.c sub_switch)
 static GlShadow g_gls[4]; static int g_gls_next; volatile int g_glc_on=1; volatile unsigned g_glc_gen=1;   // PELOAD_AB=glcache flips g_glc_on
 
 static struct { void(*BindBuffer)(unsigned,unsigned); void(*BindBufferRange)(unsigned,unsigned,unsigned,long,long); void(*BindVertexArray)(unsigned);
@@ -5242,13 +5244,19 @@ static void d3dgl_bind_res(unsigned prog,const int*tloc,const signed char*tt,int
         else if(tx){ unsigned have=tx->gltarget?tx->gltarget:GLE_TEX2D; if(!tt) want=have; if(have==want) wtex=tx->gltex; }
         D3DObj*sv=views?views[r]:0; int skip = !isbuf && tx && tx->glsrgb && !dxgi_is_srgb(sv?sv->vfmt:tx->fmt);   // UNORM view of sRGB storage: raw read
         unsigned wsamp = (!isbuf && G.BindSampler && r<16 && samps && !GENV1("PELOAD_D3DGL_NOSAMPLER")) ? d3dgl_glsampler_x(samps[r],tx?tx->glhasmips:0,skip) : 0;
-        if(!wsamp && tx && tx->glsrgb && wtex){ gs_active(unit); G.BindTexture(want,wtex); G.TexParameteri(want,0x8A48,skip?0x8A4A:0x8A49); g_unit_tex[unit]=~0u; }   // no sampler object: texture's own decode state
+        // no sampler object: the texture's own decode state, set only when it changes (a TexParameteri makes Apple's driver
+        // re-validate the texture at the next draw; it ran ~1,600 times a frame in a 60-bot scene; PELOAD_D3DGL_NODECODECACHE = always)
+        if(!wsamp && tx && tx->glsrgb && wtex && (tx->gldecode_tex!=wtex || tx->gldecode!=1+skip || GENV1("PELOAD_D3DGL_NODECODECACHE"))){
+            gs_active(unit); G.BindTexture(want,wtex); G.TexParameteri(want,0x8A48,skip?0x8A4A:0x8A49); g_unit_tex[unit]=~0u; tx->gldecode_tex=wtex; tx->gldecode=1+skip; }
         if(!(units_set&&*units_set)){ G.ProgramUniform1i(prog,loc,unit); g_tb_uni++; }
         int texsame=!nocache && g_unitcache_ok && g_unit_tex[unit]==wtex && g_unit_tgt[unit]==want, sampsame=!nocache && g_unitcache_ok && g_unit_samp[unit]==wsamp;
         if(texsame && sampsame){ unit++; continue; }
         if(texsame && !GENV1("PELOAD_D3DGL_NOSPLITBIND")){   // only the sampler changed: glBindSampler names its unit itself
             g_unit_samp[unit]=wsamp; if(G.BindSampler){ G.BindSampler((unsigned)unit,wsamp); g_tb_samp++; } unit++; continue; }
         gs_active(unit); g_tb_tex++;
+        if(GENV1("PELOAD_TEXSLOT_CENSUS")){ static unsigned last[64]; static unsigned long nb,nchurn,nsamp; static double tl; int sr=r+(ubase?32:0);
+            nb++; if(last[sr]==wtex && !texsame) nchurn++; if(texsame) nsamp++; last[sr]=wtex; double now=mono_s(); if(now-tl>=2){ tl=now;
+                char m[200]; int k=snprintf(m,sizeof m,"  [texslot] %lu binds: %lu same texture as this slot's last (unit packing), %lu sampler-only\n",nb,nchurn,nsamp); (void)!write(2,m,k); nb=nchurn=nsamp=0; } }
         int bindsamp=!sampsame || GENV1("PELOAD_D3DGL_NOSPLITBIND");
         g_unit_tex[unit]=wtex; g_unit_tgt[unit]=want; g_unit_samp[unit]=wsamp;
         if(isbuf) G.BindTexture(want,wtex);

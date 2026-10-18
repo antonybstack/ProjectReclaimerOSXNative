@@ -21,6 +21,7 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
+#include <mach/mach_time.h>
 #include "glproto.h"
 #include "glhelper_fns.h"
 
@@ -120,6 +121,12 @@ static void hx_pq_publish(const uint32_t*p){
     if(sc) glEnable(GL_SCISSOR_TEST); if(fs) glEnable(GL_FRAMEBUFFER_SRGB);
     s->fence=glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE,0); s->frame=frame; glFlush(); g_slot_pending=i; }
 
+// ---- Metal pixel-format capabilities, cached: peload-gl-pf.dylib (glhelper_pf.c), weakly linked ----
+extern volatile int glhpf_on __attribute__((weak_import)); extern pthread_t glhpf_thread __attribute__((weak_import));
+extern uint64_t glhpf_hits __attribute__((weak_import)), glhpf_miss __attribute__((weak_import));
+static int g_pf_off;   // PELOAD_GL_HELPER_NOPFCACHE
+static void pf_sync(void){ if(&glhpf_on) glhpf_on=!g_pf_off && !S->ab_off; }
+
 // ---- the hand-written decoders (glproxy.c encodes the same layouts) ----
 static void hx_BindBuffer(const uint32_t*p,uint32_t n){ (void)n; glh_fn.BindBuffer(p[0],glh_name(NS_BUF,p[1])); }
 static void hx_PixelStorei(const uint32_t*p,uint32_t n){ (void)n; glh_fn.PixelStorei(p[0],(GLint)p[1]); }
@@ -202,11 +209,25 @@ static void decode(uint32_t op,const uint32_t*p,uint32_t n){
 #include "glhelper_gen.h"
     case GLOP_STAGE: hx_stage(p); break;
     case GLOP_SYNC: reply(p[0],0,0,1); break;
-    case GLOP_PQ_PUBLISH: hx_pq_publish(p); break;
+    case GLOP_PQ_PUBLISH: hx_pq_publish(p); pf_sync(); break;
     case GLOP_HELLO: if(p[0]!=GLPROTO_VERSION) logf_("  [glhelper] protocol %u, expected %u\n",p[0],GLPROTO_VERSION); break;
     case GLOP_QUIT: exit(0);
     default: logf_("  [glhelper] unknown opcode %u\n",op); break; }
     if(g_check && op>=GLOP_FIRST_GL){ GLenum e=glGetError(); if(e){ S->gl_errors++; static int ne; if(ne++<50) logf_("  [glhelper] GL error 0x%x after %s\n",e,glop_names[op-GLOP_FIRST_GL]); } } }
+
+// PELOAD_GL_HELPER_OPS=1: every 5 s the opcodes that took the most time (count per frame, us each, share of the time
+// spent decoding). Draws carry the driver's deferred state validation, so the state calls that cause it look cheap.
+static uint64_t g_op_n[256], g_op_t[256]; static double g_op_tb;
+static void ops_report(void){ double now=mono(); if(!g_op_tb){ g_op_tb=now; return; } if(now-g_op_tb<5.0) return;
+    static uint64_t pub0; uint64_t fr=S->published-pub0; pub0=S->published; if(!fr) fr=1;
+    mach_timebase_info_data_t tb; mach_timebase_info(&tb); uint64_t tot=0; for(int i=0;i<256;i++) tot+=g_op_t[i];
+    char m[2048]; int k=snprintf(m,sizeof m,"  [glhelper ops] %.0f s, %llu frames, decode %.1f ms/frame:",now-g_op_tb,(unsigned long long)fr,tot*1e-6*tb.numer/tb.denom/(double)fr);
+    for(int r=0;r<20;r++){ int bi=-1; uint64_t bt=0; for(int i=0;i<256;i++) if(g_op_t[i]>bt){ bt=g_op_t[i]; bi=i; } if(bi<0) break;
+        const char*nm=bi>=GLOP_FIRST_GL&&bi-GLOP_FIRST_GL<(int)(sizeof glop_names/sizeof glop_names[0])?glop_names[bi-GLOP_FIRST_GL]:bi==GLOP_PQ_PUBLISH?"pq_publish":bi==GLOP_STAGE?"stage":"?";
+        k+=snprintf(m+k,sizeof m-k," %s %.0f/f %.2fus %.0f%%,",nm,(double)g_op_n[bi]/fr,g_op_n[bi]?bt*1e-3*tb.numer/tb.denom/(double)g_op_n[bi]:0,100.0*bt/(double)(tot?tot:1));
+        g_op_t[bi]=0; if(k>(int)sizeof m-120) break; }
+    k+=snprintf(m+k,sizeof m-k," format queries cached %llu, asked %llu%s",&glhpf_hits?(unsigned long long)glhpf_hits:0,&glhpf_miss?(unsigned long long)glhpf_miss:0,&glhpf_on?"":" (no peload-gl-pf.dylib)");
+    memset(g_op_n,0,sizeof g_op_n); memset(g_op_t,0,sizeof g_op_t); m[k++]='\n'; (void)!write(2,m,(size_t)k); g_op_tb=now; }
 
 static void* parent_watch(void*a){ pid_t pp=(pid_t)(intptr_t)a; int kq=kqueue(); struct kevent ev; EV_SET(&ev,pp,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0);
     if(kq<0 || kevent(kq,&ev,1,0,0,0)<0){ while(getppid()==pp) sleep(1); _exit(0); }
@@ -218,10 +239,11 @@ int main(int argc,char**argv){
     S=mmap(0,sizeof(GlpShared),PROT_READ|PROT_WRITE,MAP_SHARED,fd,0); close(fd); if(S==MAP_FAILED){ logf_("  [glhelper] mmap failed\n"); return 1; }
     g_wake_fd=atoi(argv[2]); g_present_fd=atoi(argv[3]); signal(SIGPIPE,SIG_IGN);
     pthread_t t; pthread_create(&t,0,parent_watch,(void*)(intptr_t)atoi(argv[4])); pthread_detach(t);
-    g_check=getenv("PELOAD_GL_HELPER_CHECK")!=0;
+    g_check=getenv("PELOAD_GL_HELPER_CHECK")!=0; int opstats=getenv("PELOAD_GL_HELPER_OPS")!=0;
     CGLPixelFormatAttribute at[]={kCGLPFAOpenGLProfile,(CGLPixelFormatAttribute)kCGLOGLPVersion_GL4_Core,kCGLPFAAccelerated,kCGLPFAColorSize,(CGLPixelFormatAttribute)24,kCGLPFAAlphaSize,(CGLPixelFormatAttribute)8,kCGLPFADepthSize,(CGLPixelFormatAttribute)24,kCGLPFAStencilSize,(CGLPixelFormatAttribute)8,(CGLPixelFormatAttribute)0};
     CGLPixelFormatObj pf=0; GLint np=0; if(CGLChoosePixelFormat(at,&pf,&np)||!pf){ CGLPixelFormatAttribute b[]={kCGLPFAOpenGLProfile,(CGLPixelFormatAttribute)kCGLOGLPVersion_GL4_Core,(CGLPixelFormatAttribute)0}; CGLChoosePixelFormat(b,&pf,&np); }
     if(!pf || CGLCreateContext(pf,0,&g_ctx) || !g_ctx){ logf_("  [glhelper] no GL context\n"); return 1; }
+    if(&glhpf_thread){ g_pf_off=getenv("PELOAD_GL_HELPER_NOPFCACHE")!=0; glhpf_thread=pthread_self(); pf_sync(); }
     CGLSetCurrentContext(g_ctx); glh_load();
     { pthread_attr_t a; (void)a; pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0); }
     logf_("  [glhelper] native GL helper ready: %s\n",(const char*)glGetString(GL_RENDERER));
@@ -239,7 +261,9 @@ int main(int argc,char**argv){
         while(tail!=head){
             uint64_t pos=tail%GLP_RING_WORDS; uint32_t h=S->ring[pos], op=GLCMD_OP(h), nw=GLCMD_NW(h);
             if(op==GLOP_WRAP){ tail+=GLP_RING_WORDS-pos; continue; }
-            decode(op,&S->ring[pos+1],nw); tail+=1+nw; S->cmds++;
+            if(__builtin_expect(opstats,0)){ uint64_t t0=mach_absolute_time(); decode(op,&S->ring[pos+1],nw); g_op_t[op&255]+=mach_absolute_time()-t0; g_op_n[op&255]++; if(op==GLOP_PQ_PUBLISH) ops_report(); }
+            else decode(op,&S->ring[pos+1],nw);
+            tail+=1+nw; S->cmds++;
             if((S->cmds&255)==0){ __atomic_store_n(&S->tail,tail,__ATOMIC_RELEASE); if(g_npq) poll_queries(); }
         }
         __atomic_store_n(&S->tail,tail,__ATOMIC_RELEASE);
