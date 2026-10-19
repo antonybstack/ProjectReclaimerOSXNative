@@ -5300,7 +5300,7 @@ static uint64_t g_cbbatch_n, g_cbbatch_cbs; volatile int g_cbbatch_on=-1;   // P
 // a different buffer. Within one ring generation the ring is append-only, so those copies are still intact: point the
 // buffer at one again. upcopy holds the bytes a buffer last uploaded; a match is always an exact memcmp (the content hash
 // only finds candidates among other buffers). PELOAD_D3DGL_NOCBDEDUP = always upload, PELOAD_D3DGL_NOCBSHARE = only the
-// buffer's own last copy (PELOAD_AB=flag:<secs> switches both).
+// buffer's own last copy.
 static uint64_t g_cbdedup_n, g_cbdedup_bytes, g_cbshare_n;
 typedef struct { uint64_t h, off, len, size, cap; uint32_t gen; uint8_t*bytes; } CbShare;
 static CbShare g_cbshare[1024];   // recent ring copies by content hash (direct-mapped; each holds its bytes, <= 16 KB)
@@ -5313,7 +5313,7 @@ static void cb_point(D3DObj*cb,uint64_t off,uint64_t len){   // cb's ring copy i
     if(!cb->upcopy){ cb->upgen=0; return; }
     memcpy(cb->upcopy,cb->data,(size_t)cb->size); cb->uplen=len; cb->upoff=off; cb->upgen=g_ring_gen; }
 static int cb_reuse(D3DObj*cb,uint64_t n){
-    if(!g_ab_flag || GENV1("PELOAD_D3DGL_NOCBDEDUP")) return 0;
+    if(GENV1("PELOAD_D3DGL_NOCBDEDUP")) return 0;
     if(cb->upcopy && cb->upgen==g_ring_gen && cb->ubosz==g_ring_gen && cb->glubo==cb->upoff && cb->uplen>=n && cb->upcopy_n==cb->size
        && !memcmp(cb->upcopy,cb->data,(size_t)cb->size)){ cb->uboglver=cb->ver; g_cbdedup_n++; g_cbdedup_bytes+=n; return 1; }
     if(!cb_share_on() || cb->size>16384) return 0;
@@ -5321,7 +5321,7 @@ static int cb_reuse(D3DObj*cb,uint64_t n){
     if(e->h!=h || e->gen!=g_ring_gen || e->size!=cb->size || e->len<n || memcmp(e->bytes,cb->data,(size_t)cb->size)) return 0;
     cb->glubo=(unsigned)e->off; cb->ubosz=g_ring_gen; cb->uboglver=cb->ver; cb_point(cb,e->off,e->len); g_cbshare_n++; g_cbdedup_bytes+=n; return 1; }
 static void cb_keep(D3DObj*cb,uint64_t n){   // after a ring upload: remember its bytes (glubo = its ring offset+1)
-    if(!g_ab_flag || GENV1("PELOAD_D3DGL_NOCBDEDUP")){ cb->upgen=0; return; }
+    if(GENV1("PELOAD_D3DGL_NOCBDEDUP")){ cb->upgen=0; return; }
     cb_point(cb,cb->glubo,n);
     if(cb->upgen && cb_share_on() && cb->size<=16384){ uint64_t h=cb_hash(cb); CbShare*e=&g_cbshare[h&1023];
         if(e->cap<cb->size){ uint8_t*b=realloc(e->bytes,(size_t)cb->size); if(!b) return; e->bytes=b; e->cap=cb->size; }

@@ -39,6 +39,7 @@ quiet).
 | GL helper (default) | 41.3 | 36.6 | 5,084 | 17.2 / 74.6 / 24.6 |
 | `PELOAD_GL_HELPER=0` | 14.9 | 14.1 | 5,011 | 66.2 / 213.2 / - |
 | GL helper, 2026-10-18 (pf cache, sRGB decode, cbuffer dedupe, GL state cache; load average ~14) | 57.5 | 53.3 | 5,079 | 16.6 / 60.3 / 17.9 |
+| `PELOAD_GL_HELPER=0`, 2026-10-18 | 17.1 | 15.9 | 5,011 | 57.3 / 187.3 / - |
 
 The helper is 100% busy: in this scene the frame rate is set by the helper's GL work, ~4.8 us of native driver time
 per draw. The loader's side (D3D -> GL translation and encoding) is 17.2 ms, ~3.4 us per draw. Next steps that this
@@ -62,9 +63,18 @@ goes, per GL call, and how many framebuffer passes a frame has (it times every c
 | GL state cache on by default (`PELOAD_AB=glcache`) | 18.9 / 19.3 (-3.0% median) | 52.1 / 49.5 (+3.2%) | 9 / 8 |
 
 Tried, not worth it: the GL state cache before the constant-buffer change (-1.4%, noise); polling occlusion queries only
-after a publish (they force a command-buffer submit when their commands are not submitted yet; -0.1%); remapping texture units
+after a publish (they force a command-buffer submit when their commands are not submitted yet; -0.1%); deferring
+clears into the next draw's pass with glClearBuffer (clear-only passes 21 -> 2 a frame, but only -1.3% helper CPU: a pass
+that only clears is cheap in Apple's driver; not worth the risk of a missed flush path); remapping texture units
 (`PELOAD_TEXSLOT_CENSUS`: of ~12,000 texture binds a frame only 17% rebind a slot's previous texture; the rest are real
-texture changes between draws).
+texture changes between draws). A VAO per vertex-buffer set instead of re-pointing the shared VAO: a native micro-benchmark
+(3 attributes, 64 buffers) gives 0.72-0.90 us/draw against 0.64-0.75 re-pointed (floor 0.45 with no change), so Apple's
+driver rebuilds the vertex state either way.
+
+What is left is per draw inside Apple's driver on the helper's one thread (glDrawElements ~55% of its time at ~2.6 us:
+texture/sampler and uniform-buffer re-validation, Metal encoding, resource tracking). Bigger steps would be architectural:
+two GL contexts on two helper threads (e.g. shadow passes apart from the main view, joined with fences), or merging
+consecutive draws that differ only in constants into instanced draws.
 
 The constant-buffer finding: Halo 3 maps and refills most of its cbuffers for every draw; 78% of the uploads (73% of the
 bytes) equalled that buffer's previous upload and another 20% an upload of a different buffer shortly before. The ring is
