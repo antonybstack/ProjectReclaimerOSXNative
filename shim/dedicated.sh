@@ -24,7 +24,7 @@ MCC="$PFX/Program Files/Steam/steamapps/common/Halo The Master Chief Collection"
 
 EXE="${RECLAIMER_EXE:-}"
 if [ -z "$EXE" ]; then
-  for c in client/project-reclaimer-client-v0.9.18.exe; do [ -f "$c" ] && EXE="$c" && break; done
+  for c in client/project-reclaimer-client-v0.9.20.exe client/project-reclaimer-client-v0.9.18.exe; do [ -f "$c" ] && EXE="$c" && break; done
 fi
 [ -n "$EXE" ] && [ -f "$EXE" ] || { echo "Project Reclaimer client exe not found (see README)"; exit 1; }
 [ -x shim/build/peload ] || { echo "shim/build/peload missing: run 'bash shim/build.sh'"; exit 1; }

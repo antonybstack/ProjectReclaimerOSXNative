@@ -39,11 +39,12 @@ Known gaps:
 - An Apple Silicon Mac with **Rosetta 2** (`softwareupdate --install-rosetta --agree-to-license`).
   Developed and tested on an M4 running macOS 26.
 - Your own copy of **Halo: The Master Chief Collection** on Steam, with the Halo 3 Multiplayer files.
-- **Project Reclaimer client v0.9.18** — `project-reclaimer-client-v0.9.18.exe` from
+- **Project Reclaimer client v0.9.20** — `project-reclaimer-client-v0.9.20.exe` from
   https://github.com/ProjectReclaimer/project-reclaimer-releases/releases (SHA-256
-  `a8d3a37ad27e31abc09d009a94210470976ecefb34908a9fb8e1a245f4924910`). The loader finds the few client
-  code paths it patches by byte signature, so other builds usually work too; v0.9.13 is also tested.
-  Servers and players are almost all on the newest release.
+  `0850d10888d984aa270e0fd5bfa833505010e9e646d789ca657a49b6e45a8a0d`). Servers admit only players on exactly
+  their own version, and they are on the newest release. The loader finds the few client code paths it patches by
+  byte signature; v0.9.18 and v0.9.13 are also tested. Don't use the client's own **Update** button: put the new exe
+  in `client/` instead (the launch scripts pick the newest known version there).
 - About 25 GB of disk space for the MCC files.
 
 No game files are included in this repository or its releases.
@@ -69,7 +70,7 @@ No game files are included in this repository or its releases.
    ./reclaimer-mac.sh download
    ```
    (Only `download` is needed; that script's other commands are for an older Wine-based setup.)
-3. **Add the client exe.** Put `project-reclaimer-client-v0.9.18.exe` in `client/`, or point
+3. **Add the client exe.** Put `project-reclaimer-client-v0.9.20.exe` in `client/`, or point
    `RECLAIMER_EXE=/path/to/exe` at it. The first launch of a new client version builds its Forge asset
    library (about 2.5 minutes, "BUILDING ASSET LIBRARY"); later launches reach the menu in ~20 s.
 

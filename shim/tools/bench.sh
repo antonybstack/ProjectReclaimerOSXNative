@@ -11,7 +11,7 @@
 cd "$(dirname "$0")/../.."
 BOTS="${1:-60}"; RUNS="${2:-1}"; EXTRA="${3:-}"
 OUT="${BENCH_OUT:-/tmp/reclaimer_bench.jsonl}"; LOG=/tmp/reclaimer_bench.log
-EXE="${BENCH_EXE:-client/project-reclaimer-client-v0.9.18.exe}"; [ -f "$EXE" ] || EXE="$HOME/ReclaimerMac/client/project-reclaimer-client-v0.9.18.exe"
+EXE="${BENCH_EXE:-}"; if [ -z "$EXE" ]; then for c in client/project-reclaimer-client-v0.9.20.exe client/project-reclaimer-client-v0.9.18.exe "$HOME/ReclaimerMac/client/project-reclaimer-client-v0.9.20.exe" "$HOME/ReclaimerMac/client/project-reclaimer-client-v0.9.18.exe"; do [ -f "$c" ] && EXE="$c" && break; done; fi
 CRT="${RECLAIMER_CRT_DIR:-}"; [ -z "$CRT" ] && { [ -f shim/crt/ucrtbase.dll ] && CRT="$PWD/shim/crt" || CRT="$HOME/ReclaimerMac/shim/crt"; }
 [ -f "$EXE" ] && [ -f "$CRT/ucrtbase.dll" ] || { echo "client exe or CRT not found ($EXE, $CRT)"; exit 2; }
 KEEP=" $(cat "$HOME/Library/Application Support/ReclaimerMac/target.pgid" "$HOME/Library/Application Support/ReclaimerMac/dedicated.pgid" 2>/dev/null | tr '\n' ' ') "

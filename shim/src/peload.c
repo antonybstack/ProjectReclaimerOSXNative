@@ -9851,7 +9851,9 @@ static void apply_patch(uint8_t*base,uint64_t rva,const uint8_t*bytes,int n){
 //                  time-limited run: unset (the direct-match probe, mode 2) or "<role>:<seconds>" with seconds > 0.
 //                  The menu runtime passes "menu:0" and never arms it; only the direct path needs this patch.
 // PELOAD_RECLAIMER_PATCHES=all | comma list of names enables the optional ones (play.sh: all).
-typedef struct { const char*name; int dflt; const char*sig; int n; int off[2]; const char*orig[2]; const char*repl[2]; } SigPatch;
+typedef struct { const char*name; int dflt; const char*sig; int n; int off[2]; const char*orig[2]; const char*repl[2]; int set; } SigPatch;
+// set: one patch can carry several sets of signatures (client builds that compiled the code differently); it is applied
+// when every signature of one set is found, and the log warns only when no set was.
 static const SigPatch g_sigpatches[]={
   {"ui-reentrancy",1,"C6 43 68 01 48 83 3B 00 0F 85 ?? ?? ?? ?? 48 C7 03 FF FF FF FF 81 7B 10 00 CA 9A 3B 75 ?? 31 C0 EB ??",
      2,{8,0x1c},{"0F 85","75"},{"90 90 90 90 90 90","90 90"}},
@@ -9863,6 +9865,16 @@ static const SigPatch g_sigpatches[]={
      1,{0x1d},{"0F 85"},{"90 90 90 90 90 90"}},
   {"xaudio",0,"48 8B 44 24 20 48 89 C1 48 F7 D9 71 ?? 48 81 C3 85 C3 60 00 48 39 5C 24 28 75 ?? 48 8D 05",
      1,{0x19},{"75"},{"90 90"}},
+  // v0.9.20 moved the 4 checks into one helper (exe+0x5c2de0) that takes a table of {slot, expected, replacement}
+  // and returns "XAudio2 import slots differ from the supported build; refused"; NOP its 4 mismatch branches.
+  {"xaudio",0,"4D 01 EE 4C 39 74 24 30 0F 85 ?? ?? ?? ?? 4C 01 EB 48 8D 4C 24 28",
+     1,{8},{"0F 85"},{"90 90 90 90 90 90"},1},
+  {"xaudio",0,"4C 01 ED 48 39 6C 24 30 0F 85 ?? ?? ?? ?? 4D 01 EF 48 8D 4C 24 28",
+     1,{8},{"0F 85"},{"90 90 90 90 90 90"},1},
+  {"xaudio",0,"48 8B 44 24 50 4C 01 E8 48 39 44 24 30 0F 85 ?? ?? ?? ?? 48 8B 54 24 48",
+     1,{0x0d},{"0F 85"},{"90 90 90 90 90 90"},1},
+  {"xaudio",0,"48 8B 44 24 40 4C 01 E8 48 39 44 24 30 75 ?? 48 8B 47 10 48 8B 4F 28",
+     1,{0x0d},{"75"},{"90 90"},1},
   {"watchdog",0,"81 BD ?? ?? ?? ?? 00 CA 9A 3B 74 ?? E8 ?? ?? ?? ?? 90 48 8B 8D ?? ?? ?? ?? 48 39 C8 75 ?? 3B 95 ?? ?? ?? ?? 72 ??",
      1,{0x0a},{"74"},{"EB"}},
 };
@@ -9879,15 +9891,25 @@ static int64_t sig_find(uint8_t*base,const uint8_t*b,const uint8_t*m,int n){
 static int sig_enabled(const SigPatch*sp){ const char*e=getenv("PELOAD_RECLAIMER_PATCHES");
     if(!strcmp(sp->name,"ui-reentrancy") && getenv("PELOAD_NO_REENTRANCY_FIX")) return 0;
     if(e && (!strcmp(e,"all") || strstr(e,sp->name))) return 1; return sp->dflt; }
+#define NSIGP (sizeof g_sigpatches/sizeof g_sigpatches[0])
 static void reentrancy_fix(void){ if(!g_base) return;   // (name kept: applies every enabled signature patch)
-    for(size_t i=0;i<sizeof g_sigpatches/sizeof g_sigpatches[0];i++){ const SigPatch*sp=&g_sigpatches[i]; if(!sig_enabled(sp)) continue;
+    static signed char st[NSIGP];   // per entry: 1 applied, -1 not found / ambiguous / unexpected bytes, 0 disabled
+    for(size_t i=0;i<NSIGP;i++){ const SigPatch*sp=&g_sigpatches[i]; if(!sig_enabled(sp)) continue; st[i]=-1;
         uint8_t b[128],m[128]; int n=sig_parse(sp->sig,b,m,128); int64_t rva=sig_find(g_base,b,m,n); char msg[200]; int k;
-        if(rva<0){ k=snprintf(msg,sizeof msg,"  [sigpatch] %s: signature %s -- NOT applied (unsupported client build?)\n",sp->name,rva==-1?"not found":"ambiguous"); (void)!write(2,msg,k); continue; }
+        if(rva<0) continue;
         int ok=1; for(int e=0;e<sp->n;e++){ uint8_t ob[16],om[16],rb[16],rm[16]; int on=sig_parse(sp->orig[e],ob,om,16); (void)rm;
             if(memcmp(g_base+rva+sp->off[e],ob,on)) ok=0; (void)sig_parse(sp->repl[e],rb,rm,16); }
         if(!ok){ k=snprintf(msg,sizeof msg,"  [sigpatch] %s: unexpected bytes at exe+0x%llx -- NOT applied\n",sp->name,(unsigned long long)rva); (void)!write(2,msg,k); continue; }
         for(int e=0;e<sp->n;e++){ uint8_t rb[16],rm[16]; int rn=sig_parse(sp->repl[e],rb,rm,16); apply_patch(g_base,(uint64_t)rva+sp->off[e],rb,rn); }
-        k=snprintf(msg,sizeof msg,"  [sigpatch] %s @ exe+0x%llx\n",sp->name,(unsigned long long)(rva+sp->off[0])); (void)!write(2,msg,k); } }
+        st[i]=1; k=snprintf(msg,sizeof msg,"  [sigpatch] %s @ exe+0x%llx\n",sp->name,(unsigned long long)(rva+sp->off[0])); (void)!write(2,msg,k); }
+    // per patch name: fine when one set had every signature applied; else say how much of each set was found
+    for(size_t i=0;i<NSIGP;i++){ if(!st[i]) continue; const char*nm=g_sigpatches[i].name; int first=1;
+        for(size_t j=0;j<i;j++) if(st[j] && !strcmp(g_sigpatches[j].name,nm)) first=0;
+        if(!first) continue;
+        int done=0; char sets[160]; int sk=0; sets[0]=0;
+        for(int set=0;set<4;set++){ int tot=0,got=0; for(size_t j=0;j<NSIGP;j++) if(st[j] && !strcmp(g_sigpatches[j].name,nm) && g_sigpatches[j].set==set){ tot++; if(st[j]>0) got++; }
+            if(!tot) continue; if(got==tot) done=1; sk+=snprintf(sets+sk,sizeof sets-sk,"%sset %d: %d of %d",sk?", ":"",set,got,tot); }
+        if(!done){ char msg[300]; int k=snprintf(msg,sizeof msg,"  [sigpatch] %s: NOT applied -- signatures not found (%s; unsupported client build?)\n",nm,sets); (void)!write(2,msg,k); } } }
 // ---- JMP-trampoline trace hooks (int3 doesn't work under Rosetta; code detours do) ----
 // PELOAD_HOOK=<mod>+<rva>:<origlen>:<id>[,...]  installs a detour at rva that logs
 // id + the guest rbx/rsi/rdi/rbp (so we can watch RefCell borrow sites etc.), runs

@@ -200,6 +200,13 @@ symlink to "Program Files/Steam/steamapps") and checks each file against the ser
 Forge 2.0 (2933266434) ships its own halo3/maps/shared.map + campaign.map besides the Forge-world maps.
 Rock-wall seams (tabled by the user, display-only): `PELOAD_D3DGL_DFCENSUS` (draws per depth func), `PELOAD_D3DGL_INVARIANT`
 (invariant gl_Position, opt-in); the main depth buffer is DXGI 19 (D32F_S8, reverse-Z) and keeps full float precision.
+Client v0.9.20 (2026-10-18; servers admit only their exact version): launchers prefer client/project-reclaimer-client-v0.9.20.exe,
+then 0.9.18. Its XAudio2 check moved into one helper (exe+0x5c2de0, a table of {slot, expected, replacement}; message "XAudio2
+import slots differ from the supported build; refused"): SigPatch.set 1 = its 4 branches; a patch is fine when one set fully
+applied. The `watchdog` signature is NOT found in 0.9.20 (32 look-alike cmp/je sites; needs the "still running after" string
+xref), so RECLAIMER_DIRECT=1 runs may hit the engine hang watchdog there; the menu path never arms it. The first launch of a new
+version builds its Forge library (5.4 min under load). The dev checkout has no shim/crt: RECLAIMER_CRT_DIR=~/ReclaimerMac/shim/crt
+(else "CRT dir (not found)" and an endless empty MessageBox). Never use the client's own Update button (untested self-replace).
 Unfocused/hidden clients are held at 60 fps by the engine; PELOAD_MAX_FPS caps lower (default 30 when hidden).
 Betrayal popup (backlog 15): halo3's native GUI screen c_gui_screen_boot_betrayer, posted by halo3+0xff5fc when
 halo3+0xfcc20 is true (player dead: +0x28 unit NONE; betrayer handle at player +0x1F0; variant betrayal booting on).
