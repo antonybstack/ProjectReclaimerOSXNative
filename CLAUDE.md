@@ -200,6 +200,9 @@ symlink to "Program Files/Steam/steamapps") and checks each file against the ser
 Forge 2.0 (2933266434) ships its own halo3/maps/shared.map + campaign.map besides the Forge-world maps.
 Rock-wall seams (tabled by the user, display-only): `PELOAD_D3DGL_DFCENSUS` (draws per depth func), `PELOAD_D3DGL_INVARIANT`
 (invariant gl_Position, opt-in); the main depth buffer is DXGI 19 (D32F_S8, reverse-Z) and keeps full float precision.
+Input lag in big games (2026-10-18): the GL helper queue had no frame cap (only the 64 MB ring), so with the submit thread on
+(40+ players) ~10 frames sat in it (~200-250 ms). PELOAD_GL_HELPER_LEAD=<n> (glproxy.c glp_pq_publish, default 2, -1 = none,
+1 = -6.5% fps); PELOAD_AB=lead A/B. Input itself arrives within ~2 ms (PeekMessage pumps NSEvents every 2 ms).
 Client v0.9.20 (2026-10-18; servers admit only their exact version): launchers prefer client/project-reclaimer-client-v0.9.20.exe,
 then 0.9.18. Its XAudio2 check moved into one helper (exe+0x5c2de0, a table of {slot, expected, replacement}; message "XAudio2
 import slots differ from the supported build; refused"): SigPatch.set 1 = its 4 branches; a patch is fine when one set fully

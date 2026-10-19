@@ -37,13 +37,13 @@ for run in $(seq 1 "$RUNS"); do
   PG=$!; set +m; t=0; limit=$(( ${BENCH_SECS:-30} + 170 * W ))
   while [ $t -lt $limit ]; do
     sleep 2; t=$((t+2))
-    if grep -q '\[bench\] RESULT\|\[bench\] .*no bots\|\[CRASH\]' "$LOG" 2>/dev/null; then break; fi
+    if grep -aq '\[bench\] RESULT\|\[bench\] .*no bots\|\[CRASH\]' "$LOG" 2>/dev/null; then break; fi
     pgrep -g $PG >/dev/null || break   # (the first client process starts the real one and exits)
   done
   sleep 1; kill -9 -- -$PG 2>/dev/null; sleep 1
-  r=$(grep -h '\[bench\] RESULT' "$LOG" | sed 's/^ *\[bench\] //')
+  r=$(grep -ah '\[bench\] RESULT' "$LOG" | sed 's/^ *\[bench\] //')
   if [ -n "$r" ]; then echo "run $run ($MAP): $r ${EXTRA:+[$EXTRA]}"
-  else echo "run $run: no result after ${t}s -- $(grep -h '\[bench\]\|\[CRASH\]' "$LOG" | tail -3 | tr '\n' ' ')"; fi
-  grep -h '\[bench\] spawned' "$LOG" | sed 's/^ */      /'
+  else echo "run $run: no result after ${t}s -- $(grep -ah '\[bench\]\|\[CRASH\]' "$LOG" | tail -3 | tr '\n' ' ')"; fi
+  grep -ah '\[bench\] spawned' "$LOG" | sed 's/^ */      /'
 done
 if [ -n "$(others)" ]; then echo "WARNING: a game process is still running after cleanup"; fi

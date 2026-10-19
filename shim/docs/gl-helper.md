@@ -102,6 +102,11 @@ does (kqueue `NOTE_EXIT`). If the helper fails to start, the loader logs it and 
   at publish, GL errors.
 - `PELOAD_GL_HELPER_CHECK=1` — the helper calls `glGetError` after every command and logs errors with the function.
 - `PELOAD_GL_HELPER_SYNCERR=1` — `glGetError` in the loader becomes a real round trip (slow; debugging only).
+- `PELOAD_GL_HELPER_LEAD=<n>` — at most n frames sent to the helper and not yet shown (default 2; `-1` = no limit, the
+  old behaviour; `1` = one frame less lag for ~6.5% fps in big games). Without it only the 64 MB ring held the render thread
+  back, and in big games (helper slower than the loader) ~10 frames queued in it: ~200-250 ms of input lag with the submit
+  thread on. `PELOAD_AB=lead:<secs>` switches the cap off in alternate phases. `PELOAD_GL_HELPER_STATS` shows the queue
+  ("frames queued for the helper") and how long the render thread waited.
 - `PELOAD_GL_HELPER_OPS=1` — every 5 s: the helper's decode time per frame and the top 20 GL calls (calls per frame,
   µs each, share), map/unmap upload bytes per frame by size, and the pixel-format cache's counts.
 - `PELOAD_GL_HELPER_NOPFCACHE=1` — no pixel-format cache. `PELOAD_AB=hflag:<secs>` switches it (anything that reads

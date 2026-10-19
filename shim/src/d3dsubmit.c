@@ -184,20 +184,21 @@ static void sub_switch(void){   // game thread, at a Present
     // PELOAD_AB=<feature>:<secs> (or PELOAD_D3DGL_SUBMIT_AB=<secs> = submit): flip a feature every <secs> in one game and
     // log each phase's fps and draws/frame. Features: submit (this thread), memcpy (big guest copies on the host).
     // flag = g_ab_flag, the loader's switch of whatever change is being measured (the code under test reads it); hflag = the
-    // GL helper's (GlpShared.ab_off: its Metal pixel-format cache, glhelper.c pf_sync). With the GL helper
+    // GL helper's (GlpShared.ab_off: its Metal pixel-format cache, glhelper.c pf_sync); lead = the frame cap on the GL helper
+    // queue (PELOAD_GL_HELPER_LEAD vs none). With the GL helper
     // each phase also logs the helper's CPU ms per frame (steadier than fps on a busy Mac).
     static int feat; extern uint64_t g_memcpy_min; static uint64_t mc_on, h0; static double hms[2];
     if(ab_s<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_AB"); ab_s=e?atof(e):0; feat=0;
-        const char*a=getenv("PELOAD_AB"); if(a){ const char*c=strchr(a,':'); ab_s=c?atof(c+1):20; feat=!strncmp(a,"memcpy",6)?1:!strncmp(a,"glcache",7)?2:!strncmp(a,"cbbatch",7)?3:!strncmp(a,"flag",4)?4:!strncmp(a,"hflag",5)?5:0; if(!ab_s) ab_s=20; }
+        const char*a=getenv("PELOAD_AB"); if(a){ const char*c=strchr(a,':'); ab_s=c?atof(c+1):20; feat=!strncmp(a,"memcpy",6)?1:!strncmp(a,"glcache",7)?2:!strncmp(a,"cbbatch",7)?3:!strncmp(a,"flag",4)?4:!strncmp(a,"hflag",5)?5:!strncmp(a,"lead",4)?6:0; if(!ab_s) ab_s=20; }
         mc_on=g_memcpy_min; t0=mono_s(); f0=g_ct_frame; d0=g_sub_ndraw; h0=g_glp?g_glp->cpu_ns:0; }
     if(ab_s>0){ double now=mono_s(); if(now-t0>=ab_s && g_sub_want<0){
             extern volatile int g_glc_on; extern volatile unsigned g_glc_gen; extern volatile int g_cbbatch_on;
-            int ph=feat==1?(g_memcpy_min!=~0ull):feat==2?g_glc_on:feat==3?(g_cbbatch_on!=0):feat==4?(g_ab_flag!=0):feat==5?(g_glp&&!g_glp->ab_off):sub_on(); unsigned long fn=g_ct_frame-f0, dn=g_sub_ndraw-d0; double dt=now-t0;
+            int ph=feat==1?(g_memcpy_min!=~0ull):feat==2?g_glc_on:feat==3?(g_cbbatch_on!=0):feat==4?(g_ab_flag!=0):feat==5?(g_glp&&!g_glp->ab_off):feat==6?(g_glp_lead>=0):sub_on(); unsigned long fn=g_ct_frame-f0, dn=g_sub_ndraw-d0; double dt=now-t0;
             uint64_t h1=g_glp?g_glp->cpu_ns:0; double hm=(h1>h0)?(h1-h0)*1e-6:0; if(nph[ph]||nph[!ph]) { sum[ph]+=dt; fr[ph]+=fn; dr[ph]+=dn; hms[ph]+=hm; nph[ph]++; }   // the first phase warms up: not counted
             char m[400]; int k=snprintf(m,sizeof m,"  [ab] %s %s: %.1f fps, %lu draws/frame, helper %.2f ms/frame (%.0f s) | totals: on %.1f fps %.2f ms (%d), off %.1f fps %.2f ms (%d)\n",
-                feat==1?"memcpy":feat==2?"glcache":feat==3?"cbbatch":feat==4?"flag":feat==5?"hflag":"submit",ph?"on ":"off",fn/dt,fn?dn/fn:0,fn?hm/fn:0,dt,
+                feat==1?"memcpy":feat==2?"glcache":feat==3?"cbbatch":feat==4?"flag":feat==5?"hflag":feat==6?"lead":"submit",ph?"on ":"off",fn/dt,fn?dn/fn:0,fn?hm/fn:0,dt,
                 sum[1]>0?fr[1]/sum[1]:0,fr[1]?hms[1]/fr[1]:0,nph[1],sum[0]>0?fr[0]/sum[0]:0,fr[0]?hms[0]/fr[0]:0,nph[0]); (void)!write(2,m,k);
-            if(feat==1) g_memcpy_min=ph?~0ull:mc_on; else if(feat==2){ if(!ph) g_glc_gen++; g_glc_on=!ph; } else if(feat==3) g_cbbatch_on=!ph; else if(feat==4) g_ab_flag=!ph; else if(feat==5){ if(g_glp) g_glp->ab_off=(uint64_t)ph; } else g_sub_want=!ph;
+            if(feat==1) g_memcpy_min=ph?~0ull:mc_on; else if(feat==2){ if(!ph) g_glc_gen++; g_glc_on=!ph; } else if(feat==3) g_cbbatch_on=!ph; else if(feat==4) g_ab_flag=!ph; else if(feat==5){ if(g_glp) g_glp->ab_off=(uint64_t)ph; } else if(feat==6){ static int on_val=2; if(ph) on_val=g_glp_lead; g_glp_lead=ph?-1:(on_val>=0?on_val:2); } else g_sub_want=!ph;
             t0=now; f0=g_ct_frame; d0=g_sub_ndraw; h0=h1; } }
     if(g_sub_auto>0 && g_sub_want<0){ static double ta; double now=mono_s(); if(now-ta>=5.0){ ta=now; extern int st_player_count(void);
             static int min=-1; if(min<0){ const char*e=getenv("PELOAD_D3DGL_SUBMIT_AUTO_MIN"); min=e?atoi(e):40; }

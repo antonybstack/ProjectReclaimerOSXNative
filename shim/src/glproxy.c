@@ -235,17 +235,31 @@ static int glp_start(void){
 
 // ---- present (render thread): copy the back buffer into a slot; (present thread): show the newest slot ----
 static volatile unsigned long g_glp_shown;   // frames the present thread drew
+static uint64_t g_glp_sent, g_glp_qsum, g_glp_qn, g_glp_qmax;   // frames sent to the helper; queue depth at each send (stats)
+volatile int g_glp_lead=-2;   // PELOAD_GL_HELPER_LEAD (PELOAD_AB=lead flips it between that and -1)
+static double g_glp_leadwait_s;   // time the render thread waited for the helper (PELOAD_GL_HELPER_LEAD)
 // PELOAD_GL_HELPER_STATS=1: every 2 s (render thread, at a present) what the helper did
 static void glp_stats(void){ static int on=-1; if(on<0) on=getenv("PELOAD_GL_HELPER_STATS")?1:0; if(!on) return;
     static double t0; static uint64_t c0,p0,f0; static double b0,i0,w0; static unsigned long s0; double now=mono_s(); if(!t0){ t0=now; return; } if(now-t0<2.0) return;
     double dt=now-t0, busy=g_glp->busy_s-b0, idle=g_glp->idle_s-i0; char m[300];
-    int k=snprintf(m,sizeof m,"  [glhelper] %.0f s: %.0fk commands/s, helper busy %.0f%%, frames published %.0f/s, shown %.0f/s, publish waits for the GPU %.1f ms/frame, GL errors %llu\n",
+    int k=snprintf(m,sizeof m,"  [glhelper] %.0f s: %.0fk commands/s, helper busy %.0f%%, frames published %.0f/s, shown %.0f/s, publish waits for the GPU %.1f ms/frame, GL errors %llu, frames queued for the helper avg %.1f max %llu, render thread waited %.1f ms/frame\n",
         dt,(g_glp->cmds-c0)/dt/1000,busy+idle>0?100*busy/(busy+idle):0,(g_glp->published-p0)/dt,(g_glp_shown-s0)/dt,
-        g_glp->fence_waits-f0?(g_glp->fence_wait_s-w0)*1000/(double)(g_glp->fence_waits-f0):0,(unsigned long long)g_glp->gl_errors); (void)!write(2,m,k);
+        g_glp->fence_waits-f0?(g_glp->fence_wait_s-w0)*1000/(double)(g_glp->fence_waits-f0):0,(unsigned long long)g_glp->gl_errors,g_glp_qn?(double)g_glp_qsum/g_glp_qn:0,(unsigned long long)g_glp_qmax,g_glp_qn?g_glp_leadwait_s*1000/g_glp_qn:0); (void)!write(2,m,k);
+    g_glp_qsum=g_glp_qn=g_glp_qmax=0; g_glp_leadwait_s=0;
     t0=now; c0=g_glp->cmds; p0=g_glp->published; f0=g_glp->fence_waits; b0=g_glp->busy_s; i0=g_glp->idle_s; w0=g_glp->fence_wait_s; s0=g_glp_shown; }
 static void glp_pq_publish(unsigned fbo,int vw,int vh,uint64_t frame){
     glp_stats();
-    uint32_t*w=glp_cmd(GLOP_PQ_PUBLISH,5); w[0]=fbo; w[1]=(uint32_t)vw; w[2]=(uint32_t)vh; memcpy(w+3,&frame,8); glp_end(); glp_wake(); }
+    uint32_t*w=glp_cmd(GLOP_PQ_PUBLISH,5); w[0]=fbo; w[1]=(uint32_t)vw; w[2]=(uint32_t)vh; memcpy(w+3,&frame,8); glp_end(); glp_wake();
+    g_glp_sent++; uint64_t q=g_glp_sent-__atomic_load_n(&g_glp->published,__ATOMIC_ACQUIRE); g_glp_qsum+=q; g_glp_qn++; if(q>g_glp_qmax) g_glp_qmax=q;
+    // PELOAD_GL_HELPER_LEAD=<n> (default 2; -1 = no limit, the old behaviour): at most n frames sent to the helper and not yet
+    // shown. Only the 64 MB ring used to hold the render thread back; when the helper is the slower side (big games) the
+    // frames queued in it are input lag: ~10 frames (~200-250 ms) in the 60-bot scene with the submit thread on (2 without).
+    // Same-run A/B (PELOAD_AB=lead): 2 = no measurable fps change; 1 = one frame less lag but -6.5% fps (the helper
+    // sometimes runs dry when a frame arrives late).
+    if(g_glp_lead==-2){ const char*e=getenv("PELOAD_GL_HELPER_LEAD"); g_glp_lead=e?atoi(e):2; } int lead=g_glp_lead;
+    if(lead>=0 && q>(uint64_t)lead){ double t0=mono_s();
+        while(g_glp_sent-__atomic_load_n(&g_glp->published,__ATOMIC_ACQUIRE)>(uint64_t)lead && mono_s()-t0<0.25){ struct timespec ts={0,50000}; nanosleep(&ts,0); }
+        g_glp_leadwait_s+=mono_s()-t0; } }
 static struct { uint32_t id; IOSurfaceRef surf; unsigned tex; } g_glp_view[GLP_SLOTS];
 static unsigned g_glp_prog, g_glp_vao; static int g_glp_sloc=-1, g_glp_szloc=-1;
 // present thread: the newest finished slot (marked as being read), or -1 if none arrived within ms
